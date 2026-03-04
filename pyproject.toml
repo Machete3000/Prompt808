@@ -1,7 +1,7 @@
 [project]
 name = "prompt808"
 description = "Prompt808 is a ComfyUI node that learns from your images and generates prompts matching your visual style"
-version = "1.0.7"
+version = "1.0.8"
 license = {file = "LICENSE"}
 dependencies = [
     "transformers",
