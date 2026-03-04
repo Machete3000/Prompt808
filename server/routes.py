@@ -4,18 +4,24 @@ Registers all Prompt808 API endpoints under /prompt808/api/*.
 This replaces the FastAPI routers when running inside ComfyUI.
 """
 
+import atexit
 import asyncio
 import hashlib
 import json
 import logging
 import shutil
 import tempfile
-import uuid
+import threading
 from pathlib import Path
 
 from aiohttp import web
 
 log = logging.getLogger("prompt808.routes")
+
+# Cancellation signal — set on server shutdown so long-running analysis
+# threads abort between pipeline stages instead of blocking exit.
+_shutdown_event = threading.Event()
+atexit.register(_shutdown_event.set)
 
 # ---------------------------------------------------------------------------
 # Route registration
@@ -25,6 +31,14 @@ try:
     from server import PromptServer  # ComfyUI's server module
     routes = PromptServer.instance.routes
     _HAS_PROMPT_SERVER = True
+
+    # Register shutdown hook so Ctrl+C sets the cancellation flag immediately,
+    # before atexit runs (atexit fires too late — threads are already joining).
+    async def _on_shutdown(_app):
+        _shutdown_event.set()
+        log.info("Prompt808: shutdown signal sent to analysis threads")
+
+    PromptServer.instance.app.on_shutdown.append(_on_shutdown)
 except Exception:
     # Not running inside ComfyUI — skip route registration
     routes = None
@@ -84,103 +98,8 @@ if _HAS_PROMPT_SERVER:
         return web.json_response(await asyncio.to_thread(_sync))
 
     # -----------------------------------------------------------------------
-    # Generation
+    # Generation — options for node dropdowns
     # -----------------------------------------------------------------------
-
-    @routes.post("/prompt808/api/generate")
-    async def generate_sync(request):
-        """Synchronous prompt generation. Supports batch_count > 1."""
-        _get_library(request)
-        body = await request.json()
-
-        seed = int(body.get("seed", 0))
-        batch_count = int(body.get("batch_count", 1))
-
-        if batch_count <= 1:
-            result = await asyncio.to_thread(_run_generation, body)
-            return web.json_response(result)
-        else:
-            results = []
-            for i in range(batch_count):
-                b = dict(body, seed=seed + i)
-                result = await asyncio.to_thread(_run_generation, b)
-                results.append(result)
-            return web.json_response({"results": results, "count": len(results)})
-
-    @routes.get("/prompt808/api/generate")
-    async def generate_sse(request):
-        """SSE endpoint for ComfyUI bridge node."""
-        _get_library(request)
-
-        try:
-            params = {
-                "seed": int(request.query.get("seed", "0")),
-                "archetype_id": request.query.get("archetype_id", "Any"),
-                "style": request.query.get("style", "Any"),
-                "mood": request.query.get("mood", "Any"),
-                "model_name": request.query.get("model_name", "None"),
-                "quantization": request.query.get("quantization", "FP16"),
-                "enrichment": request.query.get("enrichment", "Vivid"),
-                "keep_model_loaded": request.query.get("keep_model_loaded", "true").lower() == "true",
-                "temperature": float(request.query.get("temperature", "0.9")),
-                "max_tokens": int(request.query.get("max_tokens", "1024")),
-                "prefix": request.query.get("prefix", ""),
-                "suffix": request.query.get("suffix", ""),
-                "debug": request.query.get("debug", "false").lower() == "true",
-            }
-        except (ValueError, TypeError) as e:
-            return web.Response(status=400, text=f"Invalid query parameter: {e}")
-
-        generation_id = str(uuid.uuid4())[:8]
-
-        resp = web.StreamResponse(
-            status=200,
-            reason="OK",
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
-        await resp.prepare(request)
-
-        try:
-            await _sse_write(resp, "progress", {
-                "id": generation_id, "value": 0, "max": 4,
-                "message": "Starting generation...",
-            })
-            await _sse_write(resp, "progress", {
-                "id": generation_id, "value": 1, "max": 4,
-                "message": "Checking prompt cache...",
-            })
-
-            result = await asyncio.to_thread(_run_generation, params)
-
-            await _sse_write(resp, "progress", {
-                "id": generation_id, "value": 3, "max": 4,
-                "message": "Prompt composed",
-            })
-            await _sse_write(resp, "result", {
-                "id": generation_id,
-                "prompt": result["prompt"],
-                "negative_prompt": result["negative_prompt"],
-                "archetype_used": result["archetype_used"],
-                "elements_used": result["elements_used"],
-                "status": result["status"],
-                "seed": result["seed"],
-            })
-            await _sse_write(resp, "progress", {
-                "id": generation_id, "value": 4, "max": 4,
-                "message": "Complete",
-            })
-        except Exception as e:
-            log.error("SSE generation failed: %s", e, exc_info=True)
-            await _sse_write(resp, "error", {
-                "id": generation_id, "message": str(e),
-            })
-
-        await resp.write_eof()
-        return resp
 
     @routes.get("/prompt808/api/generate/options")
     async def generation_options(request):
@@ -198,17 +117,6 @@ if _HAS_PROMPT_SERVER:
             }
 
         return web.json_response(await asyncio.to_thread(_sync))
-
-    # -----------------------------------------------------------------------
-    # Generate — Model lifecycle
-    # -----------------------------------------------------------------------
-
-    @routes.post("/prompt808/api/generate/unload")
-    async def unload_llm(request):
-        """Immediately unload the LLM and free VRAM."""
-        from .core import model_manager
-        await asyncio.to_thread(model_manager.unload_model)
-        return web.json_response({"status": "unloaded"})
 
     # -----------------------------------------------------------------------
     # App-wide settings (ComfyUI settings dialog → SQLite)
@@ -256,47 +164,6 @@ if _HAS_PROMPT_SERVER:
                 db.execute(
                     "INSERT OR REPLACE INTO generate_settings (key, value) VALUES ('app', ?)",
                     (json.dumps(existing),)
-                )
-                db.commit()
-
-        await asyncio.to_thread(_sync)
-        return web.json_response({"status": "saved"})
-
-    # -----------------------------------------------------------------------
-    # Generate — Settings persistence (sidebar → node)
-    # -----------------------------------------------------------------------
-
-    @routes.get("/prompt808/api/generate/settings")
-    async def get_generate_settings(request):
-        """Return persisted generation settings from DB."""
-        def _sync():
-            from .core import database
-            db = database.get_db()
-            row = db.execute(
-                "SELECT value FROM generate_settings WHERE key='default'"
-            ).fetchone()
-            if row and row["value"]:
-                try:
-                    return json.loads(row["value"])
-                except Exception as e:
-                    log.warning("Failed to parse generate settings: %s", e)
-            return {}
-
-        return web.json_response(await asyncio.to_thread(_sync))
-
-    @routes.put("/prompt808/api/generate/settings")
-    async def save_generate_settings(request):
-        """Persist generation settings to DB."""
-        body = await request.json()
-
-        def _sync():
-            from .core import database
-            db = database.get_db()
-            lock = database.write_lock()
-            with lock:
-                db.execute(
-                    "INSERT OR REPLACE INTO generate_settings (key, value) VALUES ('default', ?)",
-                    (json.dumps(body),)
                 )
                 db.commit()
 
@@ -364,6 +231,15 @@ if _HAS_PROMPT_SERVER:
             return web.Response(status=400, text=f"Unsupported format '{suffix}'. Use: {SUPPORTED_FORMATS}")
 
         thumbnails_dir = library_manager.get_thumbnails_dir()
+
+        # Sidebar runs outside ComfyUI's workflow pipeline — aggressively
+        # free VRAM so analysis models can load after a workflow run.
+        # IMPORTANT: Call synchronously on the event-loop thread — ComfyUI's
+        # model patching internals are not thread-safe. Dispatching to a
+        # thread pool (asyncio.to_thread) corrupts tensor state and causes
+        # "Cannot set version_counter for inference tensor" on the next
+        # workflow execution.
+        _unload_comfy_models()
 
         resp = web.StreamResponse(
             status=200, reason="OK",
@@ -946,6 +822,30 @@ async def _sse_write(resp, event, data):
     await resp.write(payload.encode())
 
 
+def _unload_comfy_models():
+    """Force-unload all ComfyUI-tracked models and clear CUDA cache.
+
+    Call this from sidebar endpoints (analysis, generation) before loading
+    our own models.  Sidebar actions run outside ComfyUI's workflow pipeline,
+    so the normal free_memory(N) may not reclaim enough VRAM after a workflow
+    has loaded diffusion models.  ComfyUI will reload them on-demand when the
+    next workflow runs.
+    """
+    try:
+        import comfy.model_management
+        comfy.model_management.unload_all_models()
+        comfy.model_management.soft_empty_cache()
+        log.info("Unloaded all ComfyUI models (sidebar VRAM reclaim)")
+    except ImportError:
+        pass
+
+
+def _check_shutdown():
+    """Raise if the server is shutting down so analysis aborts promptly."""
+    if _shutdown_event.is_set():
+        raise InterruptedError("Server shutting down — analysis cancelled")
+
+
 def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
                   vision_model, quantization, device, attention_mode,
                   max_tokens, force, progress_cb=None):
@@ -953,6 +853,7 @@ def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
     _progress = progress_cb or (lambda msg: None)
     tmp_path = None
     try:
+        _check_shutdown()
         _progress("Preparing...")
         with tempfile.NamedTemporaryFile(
             dir=thumbnails_dir, suffix=suffix, delete=False
@@ -966,6 +867,7 @@ def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
                 md5.update(chunk)
         content_hash = md5.hexdigest()
 
+        _check_shutdown()
         from .core import image_embeddings
         if not force:
             _progress("Checking for duplicates...")
@@ -981,6 +883,7 @@ def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
                     "status": f"duplicate_photo (similarity: {similarity:.3f})",
                 }
 
+        _check_shutdown()
         from .api.analysis import _create_thumbnail, _get_vision_manager
         from .core import analyzer, archetypes as archetype_gen, model_manager
         from .store import archetypes as archetype_store, elements, vocabulary
@@ -995,6 +898,7 @@ def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
             progress_cb=_progress,
         )
 
+        _check_shutdown()
         _progress("Saving results...")
         thumbnail_name = _create_thumbnail(tmp_path, image_filename, content_hash)
         analysis_result["thumbnail"] = thumbnail_name
@@ -1128,61 +1032,3 @@ def _run_reset_all():
     }
 
 
-def _run_generation(params) -> dict:
-    """Execute prompt generation (runs in thread pool)."""
-    from .core import generator, model_manager, style_profile
-    from .store import archetypes, elements
-
-    seed = int(params.get("seed", 0))
-    result = generator.generate_prompt(
-        seed=seed,
-        archetype_id=params.get("archetype_id", "Any"),
-        style=params.get("style", "Any"),
-        mood=params.get("mood", "Any"),
-        model_name=params.get("model_name", "None"),
-        quantization=params.get("quantization", "FP16"),
-        enrichment=params.get("enrichment", "Vivid"),
-        temperature=float(params.get("temperature", 0.9)),
-        max_tokens=int(params.get("max_tokens", 1024)),
-        model_manager=model_manager,
-        element_store=elements,
-        archetype_store=archetypes,
-        style_profile_module=style_profile,
-        debug=bool(params.get("debug", False)),
-    )
-    result["seed"] = seed
-
-    prefix = params.get("prefix", "")
-    suffix = params.get("suffix", "")
-    if result.get("prompt") and (prefix or suffix):
-        parts = []
-        if prefix:
-            parts.append(prefix.strip())
-        parts.append(result["prompt"])
-        if suffix:
-            parts.append(suffix.strip())
-        result["prompt"] = " ".join(parts)
-
-    model_name = params.get("model_name", "None")
-    keep = params.get("keep_model_loaded", True)
-    if model_name and model_name != "None":
-        if not keep:
-            model_manager.unload_model()
-        else:
-            model_manager.offload_model()
-
-    # Broadcast result to sidebar (expected to fail outside ComfyUI)
-    try:
-        from server import PromptServer
-        PromptServer.instance.send_sync("prompt808.generation_result", {
-            "prompt": result.get("prompt", ""),
-            "negative_prompt": result.get("negative_prompt", ""),
-            "archetype_used": result.get("archetype_used", ""),
-            "elements_used": result.get("elements_used", []),
-            "status": result.get("status", ""),
-            "seed": result.get("seed", seed),
-        })
-    except Exception:
-        log.debug("PromptServer broadcast unavailable")
-
-    return result

@@ -44,7 +44,7 @@ function hookLibraryWidget(node) {
 async function refreshArchetypes(node, libraryName) {
   try {
     const headers = {};
-    if (libraryName && libraryName !== "(active)") {
+    if (libraryName) {
       headers["X-Library"] = libraryName;
     }
     const resp = await fetch("/prompt808/api/generate/options", {
@@ -101,9 +101,10 @@ async function refreshDropdowns(node) {
         const libWidget = node.widgets?.find((w) => w.name === "library");
         if (libWidget) {
           const prev = libWidget.value;
-          const names = ["(active)", ...libs.map((l) => l.name)];
+          const names = libs.map((l) => l.name);
+          const activeName = libs.find((l) => l.active)?.name || names[0];
           libWidget.options.values = names;
-          libWidget.value = names.includes(prev) ? prev : "(active)";
+          libWidget.value = names.includes(prev) ? prev : activeName;
         }
       }
     }

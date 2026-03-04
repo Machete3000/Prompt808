@@ -1,29 +1,13 @@
 """Prompt808 Generate Node — ComfyUI native prompt generator.
 
-Calls the generation pipeline directly via Python. Generation settings
-are exposed as node dropdown inputs (library, prompt_type, archetype,
-mood, llm_model, enrichment, quantization) so they are visible in the
-workflow graph. Non-dropdown settings (temperature, max_tokens,
-keep_model_loaded, debug) are still read from the sidebar SQLite settings.
+Calls the generation pipeline directly via Python. All generation settings
+are exposed as node inputs so they are visible in the workflow graph.
 """
 
 import json
 import logging
 
 log = logging.getLogger("prompt808.node")
-
-_SETTINGS_DEFAULTS = {
-    "prompt_type": "Any",
-    "archetype": "Any",
-    "mood": "Any",
-    "llm_model": "None",
-    "quantization": "FP16",
-    "enrichment": "Vivid",
-    "temperature": 0.9,
-    "max_tokens": 1024,
-    "keep_model_loaded": False,
-    "debug": False,
-}
 
 PROMPT_TYPES = ["Any", "Architectural", "Boudoir", "Cinematic", "Documentary", "Erotica",
                 "Fashion", "Fine Art", "Native", "Portrait", "Street"]
@@ -37,7 +21,7 @@ class Prompt808Generate:
     """ComfyUI node that generates prompts via Prompt808."""
 
     CATEGORY = "Prompt808"
-    DESCRIPTION = "Generates prompts from your Prompt808 library. Core settings are exposed as node inputs; temperature, max_tokens, and keep_model_loaded are configured in the sidebar. Debug mode is in ComfyUI Settings > Prompt808."
+    DESCRIPTION = "Generates prompts from your Prompt808 library. All settings are exposed as node inputs. Debug mode is in ComfyUI Settings > Prompt808."
     FUNCTION = "generate"
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("prompt", "negative_prompt", "status")
@@ -49,7 +33,7 @@ class Prompt808Generate:
 
     @classmethod
     def INPUT_TYPES(cls):
-        library_list = ["(active)"]
+        library_list = ["(no libraries)"]
         archetype_list = ["Any"]
         model_list = ["None"]
 
@@ -64,9 +48,11 @@ class Prompt808Generate:
                 libs = []
 
         if libs:
-            library_list = ["(active)"] + [lib["name"] for lib in libs]
+            library_list = [lib["name"] for lib in libs]
+            active_lib = next((lib["name"] for lib in libs if lib.get("active")), library_list[0])
         else:
             library_list = ["(no libraries)"]
+            active_lib = library_list[0]
 
         try:
             from .server.store import archetypes as arch_store
@@ -118,7 +104,7 @@ class Prompt808Generate:
             },
             "optional": {
                 "library": (library_list, {
-                    "default": library_list[0],
+                    "default": active_lib,
                     "tooltip": "Library to generate from" if libs else "No libraries — open the Prompt808 sidebar (camera icon) to create one",
                 }),
                 "prompt_type": (prompt_types, {
@@ -145,6 +131,24 @@ class Prompt808Generate:
                     "default": "FP16",
                     "tooltip": "LLM quantization (FP16, FP8, 8-bit, 4-bit)",
                 }),
+                "temperature": ("FLOAT", {
+                    "default": 0.7,
+                    "min": 0.1,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "LLM sampling temperature (higher = more creative)",
+                }),
+                "max_tokens": ("INT", {
+                    "default": 1024,
+                    "min": 128,
+                    "max": 2048,
+                    "step": 64,
+                    "tooltip": "Maximum tokens for LLM generation",
+                }),
+                "keep_model_loaded": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Keep LLM offloaded to CPU RAM after generation (faster next run)",
+                }),
                 "prefix": ("STRING", {
                     "default": "",
                     "tooltip": "Text prepended to the generated prompt (e.g. LoRA trigger word)",
@@ -162,44 +166,17 @@ class Prompt808Generate:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        return float("nan")  # Always re-execute — settings come from file
+        return float("nan")  # Always re-execute
 
-    def _load_settings(self):
-        """Read generation settings persisted by the sidebar UI.
-
-        Reads from the SQLite database (generate_settings table), which is
-        where the sidebar saves settings via PUT /prompt808/api/generate/settings.
-
-        Returns (settings_dict, used_defaults) where used_defaults is True
-        when no settings were found or they failed to parse.
-        """
-        settings = dict(_SETTINGS_DEFAULTS)
-        used_defaults = True
-        try:
-            try:
-                from .server.core import database
-            except ImportError:
-                from server.core import database
-            db = database.get_db()
-            row = db.execute(
-                "SELECT value FROM generate_settings WHERE key='default'"
-            ).fetchone()
-            if row and row["value"]:
-                saved = json.loads(row["value"])
-                settings.update(saved)
-                used_defaults = False
-        except Exception as e:
-            log.warning("Failed to load saved settings: %s", e)
-        return settings, used_defaults
-
-    def generate(self, seed, library="(active)", prompt_type="Any",
+    def generate(self, seed, library="(no libraries)", prompt_type="Any",
                  archetype="Any", mood="Any", llm_model="None",
                  enrichment="Vivid", quantization="FP16",
+                 temperature=0.7, max_tokens=1024, keep_model_loaded=False,
                  prefix="", suffix=""):
-        """Generate a prompt using node inputs + sidebar settings."""
-        # Scope to the selected library (skip if using active library)
+        """Generate a prompt using node inputs."""
+        # Scope to the selected library
         token = None
-        if library and library != "(active)":
+        if library and library != "(no libraries)":
             try:
                 try:
                     from .server.core import library_manager
@@ -223,19 +200,6 @@ class Prompt808Generate:
             log.warning("Failed to check library state: %s", e)
 
         try:
-            # Read sidebar settings for non-dropdown fields only
-            settings, used_defaults = self._load_settings()
-
-            # Node inputs override sidebar settings for dropdown fields
-            settings.update({
-                "prompt_type": prompt_type,
-                "archetype": archetype,
-                "mood": mood,
-                "llm_model": llm_model,
-                "enrichment": enrichment,
-                "quantization": quantization,
-            })
-
             # Pre-flight: check element count
             try:
                 try:
@@ -253,13 +217,23 @@ class Prompt808Generate:
                 prompt = prefix.strip() if prefix else ""
                 return (prompt, "", msg)
 
-            result = self._generate_native(seed, settings, prefix, suffix)
+            result = self._generate_native(
+                seed=seed,
+                prompt_type=prompt_type,
+                archetype=archetype,
+                mood=mood,
+                llm_model=llm_model,
+                enrichment=enrichment,
+                quantization=quantization,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                keep_model_loaded=keep_model_loaded,
+                prefix=prefix,
+                suffix=suffix,
+            )
 
-            # Build richer status line
-            status_tag = result.get("status", "ok")
-            if used_defaults:
-                status_tag += " (default settings)"
-            status_parts = [status_tag]
+            # Build status line
+            status_parts = [result.get("status", "ok")]
             status_parts.append(f"archetype: {result.get('archetype_used', 'unknown')}")
             status_parts.append(f"elements: {len(result.get('elements_used', []))}")
             status_parts.append(f"seed: {result.get('seed', seed)}")
@@ -281,7 +255,9 @@ class Prompt808Generate:
                 except Exception as e:
                     log.warning("Failed to reset library scope: %s", e)
 
-    def _generate_native(self, seed, settings, prefix, suffix):
+    def _generate_native(self, seed, prompt_type, archetype, mood, llm_model,
+                         enrichment, quantization, temperature, max_tokens,
+                         keep_model_loaded, prefix, suffix):
         """Direct Python call into the generation pipeline."""
         try:
             from .server.core import generator, model_manager, style_profile
@@ -300,25 +276,21 @@ class Prompt808Generate:
         if pbar:
             pbar.update_absolute(0, 4)
 
-        llm_model = settings.get("llm_model", "None")
-        keep = settings.get("keep_model_loaded", True)
-        debug = settings.get("debug", False)
-
         result = generator.generate_prompt(
             seed=seed,
-            archetype_id=settings.get("archetype", "Any"),
-            style=settings.get("prompt_type", "Any"),
-            mood=settings.get("mood", "Any"),
+            archetype_id=archetype,
+            style=prompt_type,
+            mood=mood,
             model_name=llm_model,
-            quantization=settings.get("quantization", "FP16"),
-            enrichment=settings.get("enrichment", "Vivid"),
-            temperature=float(settings.get("temperature", 0.9)),
-            max_tokens=int(settings.get("max_tokens", 1024)),
+            quantization=quantization,
+            enrichment=enrichment,
+            temperature=float(temperature),
+            max_tokens=int(max_tokens),
             model_manager=model_manager,
             element_store=elements,
             archetype_store=archetypes,
             style_profile_module=style_profile,
-            debug=debug,
+            debug=False,
         )
         result["seed"] = seed
 
@@ -335,26 +307,12 @@ class Prompt808Generate:
 
         # Post-generation model lifecycle
         if llm_model and llm_model != "None":
-            if not keep:
+            if not keep_model_loaded:
                 model_manager.unload_model()
             else:
                 model_manager.offload_model()
 
         if pbar:
             pbar.update_absolute(4, 4)
-
-        # Broadcast result to sidebar (expected to fail outside ComfyUI)
-        try:
-            from server import PromptServer
-            PromptServer.instance.send_sync("prompt808.generation_result", {
-                "prompt": result.get("prompt", ""),
-                "negative_prompt": result.get("negative_prompt", ""),
-                "archetype_used": result.get("archetype_used", ""),
-                "elements_used": result.get("elements_used", []),
-                "status": result.get("status", ""),
-                "seed": result.get("seed", seed),
-            })
-        except Exception:
-            log.debug("PromptServer broadcast unavailable")
 
         return result

@@ -4,7 +4,7 @@
 
 import * as api from "./api.js";
 import { getLibraryState, invalidateData } from "./prompt808.js";
-import { $el, helpButton, spinner, toast } from "./utils.js";
+import { $el, confirmDialog, helpButton, spinner, toast } from "./utils.js";
 
 let _container = null;
 let _files = [];
@@ -16,6 +16,7 @@ let _cancelled = false;
 let _stopping = false;
 let _batchIndex = 0;
 let _batchTotal = 0;
+let _currentPhase = "";
 
 // Settings (persisted to localStorage)
 let _showSettings = false;
@@ -25,7 +26,7 @@ let _maxTokens = Number(localStorage.getItem("sf_maxTokens")) || 2048;
 let _force = false;
 let _options = null;
 
-let _dropzoneEl, _fileActionsEl, _settingsEl, _btnRowEl, _progressEl, _phaseEl, _historyEl, _fileInput;
+let _dropzoneEl, _fileActionsEl, _settingsEl, _btnRowEl, _hintEl, _progressEl, _phaseEl, _historyEl, _fileInput;
 
 function _hasLibrary() {
   return !!getLibraryState().active;
@@ -63,6 +64,7 @@ export function render(container) {
     _fileActionsEl = $el("div"),
     _settingsEl = $el("div"),
     _btnRowEl = $el("div"),
+    _hintEl = $el("div"),
     _progressEl = $el("div"),
     _phaseEl = $el("div.p8-phase-text"),
     _historyEl = $el("div"),
@@ -72,6 +74,10 @@ export function render(container) {
   _renderDropzone();
   _renderSettings();
   _renderBtnRow();
+  _renderProgress();
+  _renderPhase(_currentPhase);
+  _renderHistory();
+  _renderHint();
 
   // Load options
   api.getAnalyzeOptions().then(opts => { _options = opts; _renderSettings(); }).catch(() => {});
@@ -319,6 +325,18 @@ function _renderBtnRow() {
   _btnRowEl.appendChild(row);
 }
 
+function _renderHint() {
+  _hintEl.innerHTML = "";
+  if (_analyzing) return;
+  const libState = getLibraryState();
+  const activeLib = libState.libraries.find(l => l.active);
+  if (!activeLib || activeLib.element_count === 0) return;
+
+  _hintEl.appendChild($el("p.p8-hint", {
+    innerHTML: 'Add the <strong>Prompt808 Generate</strong> node to your ComfyUI workflow to generate prompts from this library.',
+  }));
+}
+
 function _renderProgress() {
   _progressEl.innerHTML = "";
   if (!_analyzing || _batchTotal <= 1) return;
@@ -330,7 +348,8 @@ function _renderProgress() {
 }
 
 function _renderPhase(msg) {
-  _phaseEl.textContent = msg || "";
+  _currentPhase = msg || "";
+  _phaseEl.textContent = _currentPhase;
 }
 
 function _renderHistory() {
@@ -353,7 +372,6 @@ function _renderHistory() {
               item.subject_type ? $el("span.p8-badge", { textContent: item.subject_type }) : null,
               $el("span", { textContent: `+${item.elements_added} elements` }),
               item.duplicates_rejected > 0 ? $el("span.p8-history-dupes", { textContent: `-${item.duplicates_rejected} duplicates` }) : null,
-              $el("span.p8-history-status", { textContent: item.status }),
             ].filter(Boolean)),
       ])
     ),
@@ -362,6 +380,18 @@ function _renderHistory() {
 
 async function _handleAnalyze() {
   if (_files.length === 0) return;
+
+  // If the library already has elements, confirm the user wants to add to it
+  const libState = getLibraryState();
+  const activeLib = libState.libraries.find(l => l.active);
+  if (activeLib && activeLib.element_count > 0) {
+    const ok = await confirmDialog(
+      "Add to existing library?",
+      `"${activeLib.name}" already has ${activeLib.element_count} elements. New photos will be added to this library. To start a new library, cancel and use the + button above.`,
+    );
+    if (!ok) return;
+  }
+
   _cancelled = false;
   _stopping = false;
   _analyzing = true;
@@ -441,6 +471,8 @@ async function _handleAnalyze() {
   _renderBtnRow();
   _renderProgress();
   _renderPhase("");
+
+  if (succeeded > 0) _renderHint();
 
   if (!wasCancelled) {
     api.analysisCleanup().catch(() => {});

@@ -79,11 +79,13 @@ user_data/
 | `embeddings_cache`       | Sentence-transformer embeddings (BLOB, 384 floats)                      |
 | `image_embeddings_cache` | CLIP image embeddings (BLOB, 512 floats)                                |
 | `prompt_cache`           | Deterministic prompt cache keyed by input hash                          |
-| `generate_settings`      | Sidebar settings shared with the node + app-wide settings (NSFW, debug) |
+| `generate_settings`      | App-wide settings (NSFW, debug) |
 
 The database uses WAL journal mode for concurrent reads with serialized writes via a single `threading.Lock`. All embeddings are stored as raw binary BLOBs (`np.float32.tobytes()`), which is ~6x smaller than JSON float arrays.
 
 **Event loop safety:** All route handlers offload synchronous SQLite operations to the thread pool via `asyncio.to_thread()`. This prevents database access from blocking ComfyUI's aiohttp event loop, keeping the UI responsive during all API calls.
+
+**VRAM management exception:** ComfyUI model unloading (`unload_all_models()`) must run synchronously on the event-loop thread, **not** in a thread pool. ComfyUI's model patching internals (tensor operations, parameter re-wrapping) are not thread-safe — dispatching to `asyncio.to_thread()` corrupts tensor state and causes `RuntimeError: Cannot set version_counter for inference tensor` on the next workflow execution. The pre-analysis VRAM reclamation in `routes.py` calls `_unload_comfy_models()` directly (synchronously) for this reason.
 
 **Library scoping:** All store and core modules call `library_manager.get_library_id()` to get the integer primary key for the current library context. Every query is scoped by `WHERE library_id=?`. Deleting a library cascades to all related rows via `ON DELETE CASCADE`.
 
@@ -92,7 +94,7 @@ The database uses WAL journal mode for concurrent reads with serialized writes v
 - Multiple browser tabs can operate on different libraries concurrently
 - Requests without the header fall back to the persisted active library
 
-**Settings sharing:** Generation settings (style, archetype, model, enrichment, etc.) are persisted to the `generate_settings` table by the sidebar UI (key `'default'`). The ComfyUI node reads this table to get its configuration, so the sidebar acts as the settings panel for the node. App-wide settings (NSFW content toggle, debug mode) are stored in the same table with key `'app'`, synced from ComfyUI's settings dialog via the `/prompt808/api/settings` endpoint. The node's `INPUT_TYPES` reads the NSFW setting to filter adult content styles and moods from its dropdowns.
+**Settings sharing:** App-wide settings (NSFW content toggle, debug mode) are stored in the `generate_settings` table with key `'app'`, synced from ComfyUI's settings dialog via the `/prompt808/api/settings` endpoint. The node's `INPUT_TYPES` reads the NSFW setting to filter adult content styles and moods from its dropdowns. All generation settings (style, archetype, model, temperature, etc.) are exposed directly as node inputs.
 
 **Initialization:** On startup, `library_manager.migrate_if_needed()` creates the database schema and loads the active library from the `libraries` table. No libraries exist on fresh install — the user creates their first library via the sidebar, which auto-activates it.
 
@@ -109,6 +111,7 @@ The user uploads an image via multipart form data. The server:
 - Validates the file extension against supported formats (JPG, PNG, WebP, BMP, TIFF, HEIC)
 - Saves the upload to a temporary file in the active library's `thumbnails/` directory
 - Computes an MD5 content hash of the raw bytes (used for dedup and thumbnail naming)
+- **Downscales large images** — Before vision model inference, images larger than 1536px on their longest side are resized down (Lanczos). The Qwen VL processor slices images into 28×28 patches, so 4K+ resolution images generate massive token counts and peg the CPU for minutes. 1536px is sufficient for element extraction while keeping preprocessing under a few seconds.
 
 ### 2. Photo-Level Deduplication (CLIP)
 
@@ -425,7 +428,7 @@ Optional LLM naming can override this with a 3-5 word creative name.
 
 ## Prompt Generation Pipeline
 
-Entry point: `POST /prompt808/api/generate` (`server/routes.py`) or `bridge_node.py` (ComfyUI node execution)
+Entry point: `bridge_node.py` (ComfyUI node execution)
 Core logic: `server/core/generator.py`
 
 ### 1. Cache Lookup
@@ -557,11 +560,9 @@ Negative prompts combine three sources:
 
 All terms are deduplicated and sorted alphabetically.
 
-### 6. Cache Storage & WebSocket Broadcast
+### 6. Cache Storage
 
 The generated prompt + negative prompt are stored in the cache keyed by the deterministic hash.
-
-After generation, the result is broadcast to all connected clients via ComfyUI's WebSocket (`PromptServer.instance.send_sync("prompt808.generation_result", ...)`). This allows the sidebar's Generate tab to display results from node-triggered generation in real time.
 
 ### Generation Flow Summary
 
@@ -646,7 +647,7 @@ Prompt808 uses three distinct model types, each loaded lazily as singletons:
 | **Sentence-Transformer** (text) | Tag normalization + description dedup | ~80 MB    | During analysis (commit phase)  |
 | **Qwen3/2.5** (text LLM)        | Prompt composition + enrichment       | 0.7-28 GB | During generation (if selected) |
 
-Analysis models (vision, CLIP, sentence-transformer) can be unloaded via `POST /prompt808/api/analyze/cleanup`. The text LLM can be unloaded via `POST /prompt808/api/generate/unload` or by unchecking "Keep model loaded" in the sidebar.
+Analysis models (vision, CLIP, sentence-transformer) can be unloaded via `POST /prompt808/api/analyze/cleanup`. The text LLM is managed by the node's `keep_model_loaded` input — when enabled, the model is offloaded to CPU RAM after generation; when disabled, it is fully unloaded.
 
 ### Memory Management
 
@@ -655,6 +656,7 @@ Analysis models (vision, CLIP, sentence-transformer) can be unloaded via `POST /
 - Models that use BitsAndBytes quantization (4-bit, 8-bit) cannot be offloaded to CPU RAM — they are fully unloaded
 - FP16/FP8 models can be offloaded to CPU RAM when GPU VRAM is needed
 - Vision models with incompatible tensor dimensions automatically fall back from FP8 to FP16
+- **Pre-analysis VRAM reclamation:** Before loading analysis models, `routes.py` calls `comfy.model_management.unload_all_models()` synchronously on the event-loop thread to free VRAM occupied by ComfyUI workflow models. This call must not be dispatched to a thread pool — ComfyUI's model patching internals are not thread-safe (see Event loop safety above)
 - **Deep cleanup:** Every model unload (`embeddings.unload_model()`, `image_embeddings.unload_model()`, `model_manager.unload_model()`) calls `gc.collect()` followed by `comfy.model_management.soft_empty_cache()` (or `torch.cuda.empty_cache()` as fallback) to release VRAM pages held by PyTorch's caching allocator. The analysis cleanup endpoint performs a final combined cleanup pass after all models are freed
 
 ---
@@ -665,7 +667,7 @@ Analysis models (vision, CLIP, sentence-transformer) can be unloaded via `POST /
                             ANALYSIS
                             ========
 
-     Image ──> Validate ──> CLIP Dedup ──> Medium Detection ──> is_photograph?
+     Image ──> Validate ──> CLIP Dedup ──> Resize (≤1536px) ──> Medium Detection ──> is_photograph?
                                 |               |                      |
                            image_embeddings QwenVL prompt          ┌────┴────┐
                            _cache table                            v         v
@@ -762,7 +764,7 @@ Analysis models (vision, CLIP, sentence-transformer) can be unloaded via `POST /
 ```
 Prompt808/                        # ComfyUI custom node
 ├── __init__.py                   # Node registration, route registration, library initialization
-├── bridge_node.py                # Prompt808Generate node (reads sidebar settings)
+├── bridge_node.py                # Prompt808Generate node (all settings as inputs)
 ├── pyproject.toml                # ComfyUI node metadata
 ├── models.json                   # Model registry (text + vision models)
 ├── requirements.txt              # Python dependencies
@@ -772,7 +774,6 @@ Prompt808/                        # ComfyUI custom node
 │   ├── prompt808_bridge.js       # Node UI extension (Refresh Options button)
 │   ├── api.js                    # API client (X-Library header, all endpoints)
 │   ├── utils.js                  # DOM helpers ($el, toast, spinner, helpButton)
-│   ├── generate.js               # Generate tab (prompt generation, results display)
 │   ├── analyze.js                # Analyze tab (image upload, vision model selection)
 │   ├── library.js                # Library tab (element browser, edit, delete)
 │   ├── photos.js                 # Photos tab (thumbnail grid, photo management)
@@ -822,14 +823,11 @@ All endpoints are registered on ComfyUI's PromptServer under `/prompt808/api/*`.
 
 ### Generation
 
-| Method | Endpoint                           | Description                                                                                                                                                                                    |
-| ------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/prompt808/api/generate`          | Synchronous prompt generation. JSON body: `seed`, `archetype_id`, `style`, `mood`, `model_name`, `quantization`, `enrichment`, `keep_model_loaded`, `prefix`, `suffix`, `batch_count`, `debug` |
-| GET    | `/prompt808/api/generate`          | SSE streaming with progress events (same params as query string)                                                                                                                               |
-| GET    | `/prompt808/api/generate/options`  | Available styles, moods, archetypes, and text models                                                                                                                                           |
-| POST   | `/prompt808/api/generate/unload`   | Immediately unload the text LLM and free VRAM                                                                                                                                                  |
-| GET    | `/prompt808/api/generate/settings` | Read persisted generation settings                                                                                                                                                             |
-| PUT    | `/prompt808/api/generate/settings` | Save generation settings (sidebar → node)                                                                                                                                                      |
+| Method | Endpoint                           | Description                                             |
+| ------ | ---------------------------------- | ------------------------------------------------------- |
+| GET    | `/prompt808/api/generate/options`  | Available styles, moods, archetypes, and text models    |
+
+Generation is handled directly by the `Prompt808 Generate` node via `bridge_node.py`, not through HTTP endpoints.
 
 ### Libraries
 

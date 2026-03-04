@@ -302,7 +302,11 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
     # Unload previous model
     unload_model()
 
-    # Ask ComfyUI to free VRAM before loading our model
+    # Ask ComfyUI to free VRAM before loading our model.
+    # NOTE: sidebar callers (routes.py) should call unload_all_models()
+    # before invoking generation — free_memory() alone may not reclaim
+    # enough after a workflow run.  We still call free_memory() here as
+    # a safety net for the node path (where ComfyUI manages memory).
     if device == "cuda":
         try:
             import comfy.model_management
@@ -333,7 +337,7 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
     use_bnb = False
 
     if is_pre_quantized:
-        load_kwargs["torch_dtype"] = "auto"
+        load_kwargs["dtype"] = "auto"
         # Pre-import compressed_tensors so it's in sys.modules before
         # transformers tries to find it. ComfyUI's runtime can interfere
         # with late imports during model deserialization.
@@ -359,7 +363,7 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
         load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         use_bnb = True
     else:
-        load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
+        load_kwargs["dtype"] = torch.float16 if device == "cuda" else torch.float32
 
     _loaded_is_bnb = use_bnb
 
@@ -367,7 +371,9 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
         load_kwargs["device_map"] = {"": "cuda:0"}
 
     log.info("Loading model %s (%s, %s) on %s...", model_name, quantization, attn_impl, device)
+
     _loaded_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+
     _loaded_model = AutoModelForCausalLM.from_pretrained(
         repo_id, **load_kwargs
     ).eval()

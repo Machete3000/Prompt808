@@ -2,20 +2,9 @@
 
 **Vision-LLM prompt generation for ComfyUI** — analyze your images, build a personal style library, and generate prompts that match your aesthetic.
 
-![Prompt808 sidebar](docs/screenshots/hero.png)
-
 ## What It Does
 
 Prompt808 learns from your images. Drop in reference photos or artwork, and a vision model extracts the elements that define each image — lighting, composition, palette, mood, and more. Those elements become a growing library that Prompt808 draws from to generate prompts tailored to your visual style.
-
-## Screenshots
-
-|                                                |                                                  |
-| ---------------------------------------------- | ------------------------------------------------ |
-| ![Generate tab](docs/screenshots/generate.png) | ![Analyze tab](docs/screenshots/analyze.png)     |
-| Generate prompts from your library             | Analyze images to extract elements               |
-| ![Workflow node](docs/screenshots/node.png)    | ![Library browser](docs/screenshots/library.png) |
-| Wire directly into ComfyUI workflows           | Browse and edit extracted elements               |
 
 ## Features
 
@@ -63,25 +52,23 @@ Navigate to the **Analyze** tab. Add images by:
 
 Supported formats: JPG, PNG, WebP, BMP, TIFF, HEIC. Batch upload is supported — each image is processed sequentially with live progress.
 
+![Analyze tab](docs/screenshots/analyze.png)
+
 ### 3. Browse your library
 
 The **Library** tab shows all extracted elements. Filter by category, edit descriptions and tags, or delete elements.
 
 The **Photos** tab displays thumbnails of all analyzed images. Click a photo to see its extracted elements, or delete a photo to remove it with all associated data.
 
+![Library browser](docs/screenshots/library.png)
+
 ### 4. Generate prompts
 
-On the **Generate** tab, select a style, mood, and archetype, then click Generate. Copy the prompt and negative prompt to your clipboard, or wire them directly from the node.
-
-### 5. Use the node
-
-Add a **Prompt808 Generate** node to your ComfyUI workflow. Core generation settings are exposed as node dropdown inputs; temperature, max_tokens, and keep_model_loaded are read from the sidebar settings.
+Add a **Prompt808 Generate** node to your ComfyUI workflow. All generation settings are exposed as node inputs — style, mood, archetype, LLM model, temperature, and more.
 
 ![Node in workflow](docs/screenshots/node-workflow.png)
 
-Generation results from the node are automatically pushed to the sidebar's Generate tab via WebSocket.
-
-### 6. Multi-library workflow
+### 5. Multi-library workflow
 
 Use the library dropdown and action buttons at the top of the sidebar to:
 
@@ -99,6 +86,7 @@ Libraries are fully isolated — the same image can exist in different libraries
 | -------------------------------- | ------- | ----------------------------------------------- |
 | Qwen3-VL-8B-Instruct             | ~12 GB  | Default, good quality                           |
 | Qwen3-VL-8B-Instruct-abliterated | ~12 GB  | Abliterated variant for unrestricted extraction |
+| Qwen3-VL-8B-Instruct-abliterated-v2 | ~12 GB | Alternative abliterated variant                |
 | Qwen3-VL-8B-Instruct-FP8         | ~7.5 GB | Pre-quantized, good for 8 GB cards              |
 | Qwen3-VL-8B-Thinking             | ~12 GB  | Chain-of-thought reasoning                      |
 | Qwen3-VL-8B-Thinking-FP8         | ~7.5 GB | Thinking model, pre-quantized                   |
@@ -117,6 +105,8 @@ Vision models with non-standard tensor dimensions automatically fall back from F
 | Qwen3-1.7B               | 3.5 GB      | 1.3 GB       |                                                 |
 | Qwen3-4B                 | 8.5 GB      | 2.8 GB       |                                                 |
 | Qwen3-8B                 | 17 GB       | 5.5 GB       |                                                 |
+| Qwen3-8B-Abliterated     | 17 GB       | 5.5 GB       | Abliterated for unrestricted output             |
+| Qwen3-8B-Abliterated-v2  | 17 GB       | 5.5 GB       | Alternative abliterated variant                 |
 | Qwen3-8B-Abliterated-FP8 | ~9 GB       | —            | Native FP8, abliterated for unrestricted output |
 | Qwen3-32B                | 64 GB       | 18 GB        |                                                 |
 | Qwen2.5-3B-Instruct      | 6 GB        | 2 GB         |                                                 |

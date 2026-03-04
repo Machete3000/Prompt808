@@ -610,6 +610,16 @@ dialog.p8-dialog::backdrop {
 .p8-drop-label { font-size: 14px; color: var(--p8-text-secondary); }
 .p8-drop-hint { font-size: 12px; color: var(--p8-text-muted); margin-top: 6px; }
 
+.p8-hint {
+  font-size: 12px;
+  color: var(--p8-text-muted);
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--p8-accent);
+  line-height: 1.5;
+}
+.p8-hint strong { color: var(--p8-text); }
+
 .p8-preview-grid {
   display: flex;
   flex-wrap: wrap;

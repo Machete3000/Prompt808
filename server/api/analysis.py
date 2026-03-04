@@ -210,7 +210,7 @@ class VisionModelManager:
     """Minimal wrapper for QwenVL vision model inference.
 
     Loads a Qwen2-VL or Qwen3-VL model using the transformers
-    AutoModelForCausalLM + AutoProcessor pipeline.
+    AutoModelForImageTextToText + AutoProcessor pipeline.
     """
 
     def __init__(self, model_name, quantization, device, attention_mode):
@@ -230,11 +230,6 @@ class VisionModelManager:
 
         import torch
         from transformers import AutoProcessor
-
-        try:
-            from transformers import AutoModelForImageTextToText as VLAutoModel
-        except ImportError:
-            from transformers import AutoModelForVision2Seq as VLAutoModel
 
         # Resolve device
         device = self.device
@@ -262,6 +257,11 @@ class VisionModelManager:
         repo_id = info["repo_id"]
         is_pre_quantized = info.get("quantized", False)
 
+        try:
+            from transformers import AutoModelForImageTextToText as VLAutoModel
+        except ImportError:
+            from transformers import AutoModelForVision2Seq as VLAutoModel
+
         # Build loading kwargs
         load_kwargs = {
             "trust_remote_code": True,
@@ -269,7 +269,7 @@ class VisionModelManager:
         }
 
         if is_pre_quantized:
-            load_kwargs["torch_dtype"] = "auto"
+            load_kwargs["dtype"] = "auto"
             try:
                 import compressed_tensors  # noqa: F401
             except ImportError:
@@ -290,7 +290,7 @@ class VisionModelManager:
             from transformers import BitsAndBytesConfig
             load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         else:
-            load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
+            load_kwargs["dtype"] = torch.float16 if device == "cuda" else torch.float32
 
         if device == "cuda":
             load_kwargs["device_map"] = {"": "cuda:0"}
@@ -299,24 +299,6 @@ class VisionModelManager:
         from ..core.model_manager import resolve_attention
         attn_impl = resolve_attention(self.attention_mode)
         load_kwargs["attn_implementation"] = attn_impl
-
-        # Ask ComfyUI to free VRAM before loading vision model
-        if device == "cuda":
-            vram_req = info.get("vram_requirement", {})
-            if self.quantization == "4-bit":
-                vram_req_gb = vram_req.get("4bit", 0)
-            elif self.quantization in ("8-bit", "FP8"):
-                vram_req_gb = vram_req.get("8bit", 0)
-            else:
-                vram_req_gb = vram_req.get("full", 0)
-            if vram_req_gb > 0:
-                try:
-                    import comfy.model_management
-                    estimated_bytes = int(vram_req_gb * 1024**3)
-                    comfy.model_management.free_memory(estimated_bytes, comfy.model_management.get_torch_device())
-                    log.info("Asked ComfyUI to free ~%.1fGB VRAM for vision model", vram_req_gb)
-                except ImportError:
-                    pass
 
         log.info("Loading vision model %s (%s, attn=%s)...",
                  self.model_name, self.quantization, attn_impl)
@@ -329,7 +311,7 @@ class VisionModelManager:
                 log.warning("FP8 loading failed for %s (%s), falling back to FP16",
                             self.model_name, e)
                 load_kwargs.pop("quantization_config", None)
-                load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
+                load_kwargs["dtype"] = torch.float16 if device == "cuda" else torch.float32
                 self.quantization = "FP16"
                 self._model = VLAutoModel.from_pretrained(repo_id, **load_kwargs).eval()
             else:
@@ -347,6 +329,19 @@ class VisionModelManager:
         torch.manual_seed(seed)
 
         image = Image.open(image_path).convert("RGB")
+
+        # Downscale large images to reduce CPU preprocessing time.
+        # The Qwen VL processor slices images into 28x28 patches — a 21 MB
+        # PNG at 4K+ resolution generates massive token counts and pegs the
+        # CPU for minutes.  1536px on the longest side is plenty for element
+        # extraction and keeps preprocessing under a few seconds.
+        MAX_SIDE = 1536
+        w, h = image.size
+        if max(w, h) > MAX_SIDE:
+            scale = MAX_SIDE / max(w, h)
+            image = image.resize(
+                (round(w * scale), round(h * scale)), Image.LANCZOS
+            )
 
         # Build chat messages with image
         messages = [

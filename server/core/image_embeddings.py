@@ -33,14 +33,6 @@ def _get_model():
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
-        # Ask ComfyUI to free VRAM before loading CLIP (~350MB + margin)
-        if torch.cuda.is_available():
-            try:
-                import comfy.model_management
-                comfy.model_management.free_memory(400_000_000, comfy.model_management.get_torch_device())
-            except ImportError:
-                pass
-
         log.info("Loading image embedding model %s...", DEFAULT_MODEL_NAME)
         _processor = CLIPProcessor.from_pretrained(DEFAULT_MODEL_NAME, use_fast=True)
         _model = CLIPModel.from_pretrained(DEFAULT_MODEL_NAME)

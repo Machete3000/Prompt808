@@ -151,32 +151,10 @@ export function regenerateArchetypes() {
   return request("/library/archetypes/regenerate", { method: "POST" });
 }
 
-// ---- Generation ----
-
-export function generatePrompt(params) {
-  return request("/generate", {
-    method: "POST",
-    body: JSON.stringify(params),
-  });
-}
+// ---- Generation (node bridge) ----
 
 export function getGenerateOptions() {
   return request("/generate/options");
-}
-
-export function getGenerateSettings() {
-  return request("/generate/settings");
-}
-
-export function saveGenerateSettings(settings) {
-  return request("/generate/settings", {
-    method: "PUT",
-    body: JSON.stringify(settings),
-  });
-}
-
-export function unloadLLM() {
-  return request("/generate/unload", { method: "POST" });
 }
 
 // ---- Style Profiles ----

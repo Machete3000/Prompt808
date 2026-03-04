@@ -2,7 +2,7 @@
  * Prompt808 — ComfyUI native extension.
  *
  * Registers the Prompt808 panel as a sidebar tab (or fallback menu button).
- * Tab-based internal navigation: Generate | Analyze | Library | Photos | Archetypes | Style
+ * Tab-based internal navigation: Analyze | Library | Photos | Archetypes | Style
  */
 
 import { app } from "../../scripts/app.js";
@@ -17,7 +17,6 @@ document.head.appendChild(_link);
 
 // Page modules — loaded on demand
 const pageLoaders = {
-  generate:    () => import("./generate.js"),
   analyze:     () => import("./analyze.js"),
   library:     () => import("./library.js"),
   photos:      () => import("./photos.js"),
@@ -26,7 +25,6 @@ const pageLoaders = {
 };
 
 const TABS = [
-  { id: "generate",   label: "Generate" },
   { id: "analyze",    label: "Analyze" },
   { id: "library",    label: "Library" },
   { id: "photos",     label: "Photos" },
@@ -35,7 +33,7 @@ const TABS = [
 ];
 
 // Global state
-let _activeTab = "generate";
+let _activeTab = "analyze";
 let _libraryState = { libraries: [], active: null, dataVersion: 0 };
 let _pageCache = {};      // { tabId: { module, container } }
 let _rootContainer = null;
@@ -55,11 +53,6 @@ async function refreshLibraries() {
     _libraryState.active = current ? current.name : null;
     if (_libraryState.active) api.setActiveLibrary(_libraryState.active);
     _renderLibSwitcher();
-
-    // No libraries — switch to Analyze tab so users see the upload UI
-    if (_libraryState.libraries.length === 0 && _activeTab === "generate") {
-      _switchTab("analyze");
-    }
   } catch (e) {
     console.error("Failed to fetch libraries:", e);
   }
@@ -218,45 +211,6 @@ function _renderLibSwitcher() {
     }));
   }
 
-  // Export button
-  _libSwitcher.appendChild($el("button.p8-lib-action", {
-    textContent: "\u2b06",
-    title: "Export library",
-    onClick: () => {
-      const body = $el("div", {}, [
-        $el("p.p8-dialog__message", { textContent: "Export with or without thumbnail images?" }),
-        $el("div.p8-dialog__actions", {}, [
-          $el("button.p8-btn.p8-btn--secondary", {
-            textContent: "Without Thumbnails",
-            onClick: async () => {
-              dlg.close();
-              try {
-                await api.exportLibrary(false);
-                toast("Library exported", "success");
-              } catch (err) {
-                toast("Export failed: " + err.message, "error");
-              }
-            },
-          }),
-          $el("button.p8-btn", {
-            textContent: "With Thumbnails",
-            onClick: async () => {
-              dlg.close();
-              try {
-                await api.exportLibrary(true);
-                toast("Library exported", "success");
-              } catch (err) {
-                toast("Export failed: " + err.message, "error");
-              }
-            },
-          }),
-        ]),
-      ]);
-      const dlg = new Prompt808Dialog("Export Library", body);
-      dlg.show();
-    },
-  }));
-
   // Import button
   const importInput = $el("input", {
     type: "file",
@@ -296,6 +250,45 @@ function _renderLibSwitcher() {
     textContent: "\u2b07",
     title: "Import library",
     onClick: () => importInput.click(),
+  }));
+
+  // Export button
+  _libSwitcher.appendChild($el("button.p8-lib-action", {
+    textContent: "\u2b06",
+    title: "Export library",
+    onClick: () => {
+      const body = $el("div", {}, [
+        $el("p.p8-dialog__message", { textContent: "Export with or without thumbnail images?" }),
+        $el("div.p8-dialog__actions", {}, [
+          $el("button.p8-btn.p8-btn--secondary", {
+            textContent: "Without Thumbnails",
+            onClick: async () => {
+              dlg.close();
+              try {
+                await api.exportLibrary(false);
+                toast("Library exported", "success");
+              } catch (err) {
+                toast("Export failed: " + err.message, "error");
+              }
+            },
+          }),
+          $el("button.p8-btn", {
+            textContent: "With Thumbnails",
+            onClick: async () => {
+              dlg.close();
+              try {
+                await api.exportLibrary(true);
+                toast("Library exported", "success");
+              } catch (err) {
+                toast("Export failed: " + err.message, "error");
+              }
+            },
+          }),
+        ]),
+      ]);
+      const dlg = new Prompt808Dialog("Export Library", body);
+      dlg.show();
+    },
   }));
 }
 
@@ -373,10 +366,9 @@ function renderPrompt808App(container) {
 
   container.appendChild(_rootContainer);
 
-  // Init
-  refreshLibraries();
+  // Init — await libraries so pages see the active library on first render
   _renderTabs();
-  _switchTab(_activeTab);
+  refreshLibraries().then(() => _switchTab(_activeTab));
 }
 
 // ---------------------------------------------------------------------------
