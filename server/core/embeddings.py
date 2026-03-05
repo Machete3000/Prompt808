@@ -11,6 +11,7 @@ Embedding cache is backed by SQLite BLOB storage.
 """
 
 import logging
+import threading
 
 import numpy as np
 
@@ -20,6 +21,7 @@ log = logging.getLogger("prompt808.embeddings")
 
 # Module-level singleton for the embedding model
 _model = None
+_model_lock = threading.Lock()
 
 # Thresholds (tunable)
 TAG_SIMILARITY_THRESHOLD = 0.85
@@ -29,14 +31,15 @@ DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def _get_model():
-    """Lazy-load the sentence-transformer model."""
+    """Lazy-load the sentence-transformer model (thread-safe)."""
     global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        log.info("Loading embedding model %s...", DEFAULT_MODEL_NAME)
-        _model = SentenceTransformer(DEFAULT_MODEL_NAME)
-        log.info("Embedding model loaded")
-    return _model
+    with _model_lock:
+        if _model is None:
+            from sentence_transformers import SentenceTransformer
+            log.info("Loading embedding model %s...", DEFAULT_MODEL_NAME)
+            _model = SentenceTransformer(DEFAULT_MODEL_NAME)
+            log.info("Embedding model loaded")
+        return _model
 
 
 def unload_model():

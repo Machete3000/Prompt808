@@ -8,6 +8,7 @@ import hashlib
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 try:
@@ -402,17 +403,21 @@ class VisionModelManager:
 
 # Module-level vision model manager singleton
 _vision_manager = None
+_vision_lock = threading.Lock()
 
 
 def _get_vision_manager(model_name, quantization, device, attention_mode):
     global _vision_manager
-    if (_vision_manager is None
-            or _vision_manager.model_name != model_name
-            or _vision_manager.requested_quantization != quantization):
-        if _vision_manager is not None:
-            _vision_manager.unload()
-        _vision_manager = VisionModelManager(model_name, quantization, device, attention_mode)
-    return _vision_manager
+    with _vision_lock:
+        if (_vision_manager is None
+                or _vision_manager.model_name != model_name
+                or _vision_manager.requested_quantization != quantization
+                or getattr(_vision_manager, "device", None) != device
+                or getattr(_vision_manager, "attention_mode", None) != attention_mode):
+            if _vision_manager is not None:
+                _vision_manager.unload()
+            _vision_manager = VisionModelManager(model_name, quantization, device, attention_mode)
+        return _vision_manager
 
 
 @router.post("/analyze/cleanup")

@@ -47,6 +47,8 @@ export function onDataVersionChanged() { _fetchProfiles(); }
 
 async function _fetchProfiles() {
   _loading = true;
+  _expanded = {};
+  _details = {};
   _renderList();
   try {
     const data = await api.getStyleProfiles();

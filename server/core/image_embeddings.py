@@ -9,6 +9,7 @@ thread-safe. Cache backed by SQLite BLOB storage.
 
 import gc
 import logging
+import threading
 
 import numpy as np
 
@@ -19,6 +20,7 @@ log = logging.getLogger("prompt808.image_embeddings")
 # Module-level singletons
 _model = None
 _processor = None
+_model_lock = threading.Lock()
 
 # Similarity threshold — high to only catch near-identical photos
 PHOTO_DEDUP_THRESHOLD = 0.95
@@ -27,22 +29,23 @@ DEFAULT_MODEL_NAME = "openai/clip-vit-base-patch32"
 
 
 def _get_model():
-    """Lazy-load the CLIP model and processor."""
+    """Lazy-load the CLIP model and processor (thread-safe)."""
     global _model, _processor
-    if _model is None:
-        import torch
-        from transformers import CLIPModel, CLIPProcessor
+    with _model_lock:
+        if _model is None:
+            import torch
+            from transformers import CLIPModel, CLIPProcessor
 
-        log.info("Loading image embedding model %s...", DEFAULT_MODEL_NAME)
-        _processor = CLIPProcessor.from_pretrained(DEFAULT_MODEL_NAME, use_fast=True)
-        _model = CLIPModel.from_pretrained(DEFAULT_MODEL_NAME)
+            log.info("Loading image embedding model %s...", DEFAULT_MODEL_NAME)
+            _processor = CLIPProcessor.from_pretrained(DEFAULT_MODEL_NAME, use_fast=True)
+            _model = CLIPModel.from_pretrained(DEFAULT_MODEL_NAME)
 
-        if torch.cuda.is_available():
-            _model = _model.to("cuda")
+            if torch.cuda.is_available():
+                _model = _model.to("cuda")
 
-        _model.eval()
-        log.info("Image embedding model loaded")
-    return _model, _processor
+            _model.eval()
+            log.info("Image embedding model loaded")
+        return _model, _processor
 
 
 def unload_model():

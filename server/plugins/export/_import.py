@@ -65,6 +65,37 @@ _JSON_COLUMN_TYPES = {
 }
 
 
+def _deduplicate_name(name, library_manager):
+    """If a library with *name* already exists, append (2), (3), … until unique.
+
+    Respects the 50-char library name limit by truncating the base name if needed.
+    """
+    from ...core import database
+    db = database.get_db()
+
+    # Check if name is already free (case-insensitive, matching create_library)
+    row = db.execute(
+        "SELECT name FROM libraries WHERE LOWER(name)=LOWER(?)", (name,)
+    ).fetchone()
+    if row is None:
+        return name
+
+    # Collision — find the next available suffix
+    for i in range(2, 100):
+        suffix = f" ({i})"
+        # Truncate base name to stay within 50-char limit
+        max_base = 50 - len(suffix)
+        candidate = name[:max_base] + suffix
+        row = db.execute(
+            "SELECT name FROM libraries WHERE LOWER(name)=LOWER(?)", (candidate,)
+        ).fetchone()
+        if row is None:
+            return candidate
+
+    # Extremely unlikely — 99 copies of the same name
+    raise ValueError(f"Cannot deduplicate library name '{name}': too many copies")
+
+
 def handle_import(file_data, target_library_name=None):
     """Import a .p808 zip file into a new or existing library.
 
@@ -83,83 +114,86 @@ def handle_import(file_data, target_library_name=None):
     except zipfile.BadZipFile:
         return {"status": "error", "message": "Invalid .p808 file (not a valid zip)"}
 
-    # Read metadata
-    try:
-        meta_raw = zf.read("metadata.json")
-        meta = json.loads(meta_raw)
-    except (KeyError, json.JSONDecodeError):
-        return {"status": "error", "message": "Invalid .p808 file (missing metadata)"}
+    with zf:
+        # Read metadata
+        try:
+            meta_raw = zf.read("metadata.json")
+            meta = json.loads(meta_raw)
+        except (KeyError, json.JSONDecodeError):
+            return {"status": "error", "message": "Invalid .p808 file (missing metadata)"}
 
-    # Format version validation — backward compat: treat missing as version 1
-    format_version = meta.get("format_version", 1)
-    if format_version != _FORMAT_VERSION:
-        return {
-            "status": "error",
-            "message": (f"Unsupported .p808 format version {format_version} "
-                        f"(expected {_FORMAT_VERSION})"),
-        }
+        # Format version validation — backward compat: treat missing as version 1
+        format_version = meta.get("format_version", 1)
+        if format_version != _FORMAT_VERSION:
+            return {
+                "status": "error",
+                "message": (f"Unsupported .p808 format version {format_version} "
+                            f"(expected {_FORMAT_VERSION})"),
+            }
 
-    lib_name = target_library_name or meta.get("library_name", "imported")
+        lib_name = target_library_name or meta.get("library_name", "imported")
 
-    # Create the library if it doesn't exist
-    try:
-        library_manager.create_library(lib_name)
-    except ValueError:
-        pass  # Library already exists — merge into it
+        # Deduplicate: if a library with this name already exists, auto-suffix
+        # with (2), (3), etc. to avoid merging unrelated data.
+        lib_name = _deduplicate_name(lib_name, library_manager)
 
-    db = database.get_db()
-    lock = database.write_lock()
+        # Create the new library
+        try:
+            library_manager.create_library(lib_name)
+        except ValueError as e:
+            return {"status": "error", "message": f"Failed to create library: {e}"}
 
-    # Get the library ID
-    row = db.execute("SELECT id FROM libraries WHERE name=?", (lib_name,)).fetchone()
-    if row is None:
-        return {"status": "error", "message": f"Failed to find/create library '{lib_name}'"}
-    lib_id = row["id"]
+        db = database.get_db()
+        lock = database.write_lock()
 
-    imported_counts = {}
-    warnings = []
+        # Get the library ID
+        row = db.execute("SELECT id FROM libraries WHERE name=?", (lib_name,)).fetchone()
+        if row is None:
+            return {"status": "error", "message": f"Failed to find/create library '{lib_name}'"}
+        lib_id = row["id"]
 
-    with lock:
-        # Import data tables from the zip
-        for table_name in _VALID_COLUMNS:
-            json_name = f"{table_name}.json"
-            if json_name in zf.namelist():
-                try:
-                    raw = json.loads(zf.read(json_name))
-                    counts, table_warnings = _import_table_data(
-                        db, lib_id, table_name, raw,
-                    )
-                    imported_counts[table_name] = counts
-                    warnings.extend(table_warnings)
-                except Exception as e:
-                    log.warning("Failed to import %s: %s", table_name, e)
-                    warnings.append(f"{table_name}: import failed ({e})")
+        imported_counts = {}
+        warnings = []
 
-        # Referential integrity checks
-        integrity_warnings = _check_referential_integrity(db, lib_id)
-        warnings.extend(integrity_warnings)
+        with lock:
+            # Import data tables from the zip
+            for table_name in _VALID_COLUMNS:
+                json_name = f"{table_name}.json"
+                if json_name in zf.namelist():
+                    try:
+                        raw = json.loads(zf.read(json_name))
+                        counts, table_warnings = _import_table_data(
+                            db, lib_id, table_name, raw,
+                        )
+                        imported_counts[table_name] = counts
+                        warnings.extend(table_warnings)
+                    except Exception as e:
+                        log.warning("Failed to import %s: %s", table_name, e)
+                        warnings.append(f"{table_name}: import failed ({e})")
 
-        db.commit()
+            # Referential integrity checks
+            integrity_warnings = _check_referential_integrity(db, lib_id)
+            warnings.extend(integrity_warnings)
 
-    # Import thumbnails with directory traversal protection
-    thumb_count = 0
-    thumbnails_dir = library_manager._LIBRARIES_DIR / lib_name / "thumbnails"
-    thumbnails_dir.mkdir(parents=True, exist_ok=True)
-    safe_prefix = str(thumbnails_dir.resolve())
+            db.commit()
 
-    for name in zf.namelist():
-        if name.startswith("thumbnails/") and not name.endswith("/"):
-            filename = name.split("/", 1)[1]
-            if not filename:
-                continue
-            target_path = (thumbnails_dir / filename).resolve()
-            if not str(target_path).startswith(safe_prefix):
-                log.warning("Skipping path traversal attempt in .p808 import: %s", name)
-                continue
-            target_path.write_bytes(zf.read(name))
-            thumb_count += 1
+        # Import thumbnails with directory traversal protection
+        thumb_count = 0
+        thumbnails_dir = library_manager._LIBRARIES_DIR / lib_name / "thumbnails"
+        thumbnails_dir.mkdir(parents=True, exist_ok=True)
+        safe_prefix = str(thumbnails_dir.resolve())
 
-    zf.close()
+        for name in zf.namelist():
+            if name.startswith("thumbnails/") and not name.endswith("/"):
+                filename = name.split("/", 1)[1]
+                if not filename:
+                    continue
+                target_path = (thumbnails_dir / filename).resolve()
+                if not target_path.is_relative_to(thumbnails_dir.resolve()):
+                    log.warning("Skipping path traversal attempt in .p808 import: %s", name)
+                    continue
+                target_path.write_bytes(zf.read(name))
+                thumb_count += 1
 
     log.info("Imported library '%s': %s, %d thumbnails, %d warnings",
              lib_name, imported_counts, thumb_count, len(warnings))

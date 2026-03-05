@@ -23,9 +23,10 @@ _LIBRARIES_DIR = _BASE_DIR / "libraries"
 
 _active_library = None
 _request_library: ContextVar[str | None] = ContextVar("request_library", default=None)
+_request_library_id: ContextVar[tuple | None] = ContextVar("request_library_id", default=None)
 
-# Valid library name: 1-50 chars, alphanumeric + spaces/dashes/underscores
-_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9 _-]{1,50}$")
+# Valid library name: 1-50 chars, alphanumeric + spaces/dashes/underscores/parens
+_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9 _()\-]{1,50}$")
 
 
 def _validate_name(name):
@@ -38,7 +39,7 @@ def _validate_name(name):
     if not _NAME_PATTERN.match(name):
         raise ValueError(
             "Library name must be 1-50 characters, using only letters, "
-            "numbers, spaces, dashes, and underscores"
+            "numbers, spaces, dashes, underscores, and parentheses"
         )
     return name
 
@@ -49,15 +50,29 @@ def _effective_library():
 
 
 def get_library_id() -> int:
-    """Return the integer PK for the current library context."""
-    db = database.get_db()
+    """Return the integer PK for the current library context.
+
+    Once resolved, the (name, ID) pair is cached in a ContextVar for the
+    duration of the request. This makes in-flight requests resilient to
+    concurrent library renames — after the first resolution, the cached
+    integer ID is returned directly without a name lookup.  The cache is
+    invalidated automatically when the effective library name changes.
+    """
     name = _effective_library()
+    cached = _request_library_id.get()
+    if cached is not None:
+        cached_name, cached_id = cached
+        if cached_name == name:
+            return cached_id
+    db = database.get_db()
     row = db.execute(
         "SELECT id FROM libraries WHERE LOWER(name)=LOWER(?)", (name,)
     ).fetchone()
     if row is None:
         raise ValueError(f"Library '{name}' not found in database")
-    return row["id"]
+    lib_id = row["id"]
+    _request_library_id.set((name, lib_id))
+    return lib_id
 
 
 def get_data_dir():
@@ -88,6 +103,7 @@ def set_request_library(name):
     """
     name = _validate_name(name)
     _request_library.set(name)
+    _request_library_id.set(None)  # Reset cached ID for new library scope
 
 
 def set_active(name):

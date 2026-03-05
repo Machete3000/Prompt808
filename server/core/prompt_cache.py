@@ -16,7 +16,8 @@ from . import database, library_manager
 log = logging.getLogger("prompt808.prompt_cache")
 
 
-def _make_key(seed, archetype_id, style, mood, model_name, quantization, library_version):
+def _make_key(seed, archetype_id, style, mood, model_name, quantization,
+              library_version, enrichment="Vivid", temperature=0.7):
     """Create a deterministic hash key from all generation inputs."""
     raw = json.dumps({
         "seed": seed,
@@ -26,13 +27,17 @@ def _make_key(seed, archetype_id, style, mood, model_name, quantization, library
         "model_name": model_name,
         "quantization": quantization,
         "library_version": library_version,
+        "enrichment": enrichment,
+        "temperature": temperature,
     }, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def get(seed, archetype_id, style, mood, model_name, quantization, library_version):
+def get(seed, archetype_id, style, mood, model_name, quantization, library_version,
+        enrichment="Vivid", temperature=0.7):
     """Look up a cached prompt. Returns (prompt, negative_prompt) or None."""
-    key = _make_key(seed, archetype_id, style, mood, model_name, quantization, library_version)
+    key = _make_key(seed, archetype_id, style, mood, model_name, quantization,
+                    library_version, enrichment, temperature)
     db = database.get_db()
     lib_id = library_manager.get_library_id()
 
@@ -47,9 +52,10 @@ def get(seed, archetype_id, style, mood, model_name, quantization, library_versi
 
 
 def put(seed, archetype_id, style, mood, model_name, quantization, library_version,
-        prompt, negative_prompt):
+        prompt, negative_prompt, enrichment="Vivid", temperature=0.7):
     """Store a generated prompt in the cache."""
-    key = _make_key(seed, archetype_id, style, mood, model_name, quantization, library_version)
+    key = _make_key(seed, archetype_id, style, mood, model_name, quantization,
+                    library_version, enrichment, temperature)
     db = database.get_db()
     lib_id = library_manager.get_library_id()
     lock = database.write_lock()

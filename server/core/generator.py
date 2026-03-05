@@ -296,7 +296,8 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
         library_version = "unknown"
 
     cached = prompt_cache.get(
-        seed, archetype_id, style, mood, model_name, quantization, library_version
+        seed, archetype_id, style, mood, model_name, quantization, library_version,
+        enrichment, temperature,
     )
     if cached:
         prompt_text, negative_text = cached
@@ -414,7 +415,7 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
     # Cache the result
     prompt_cache.put(
         seed, archetype_id, style, mood, model_name, quantization,
-        library_version, prompt_text, negative_text,
+        library_version, prompt_text, negative_text, enrichment, temperature,
     )
 
     return {
@@ -793,11 +794,17 @@ def _build_negative(style, archetype=None, llm_negatives=None,
     return ", ".join(sorted(parts))
 
 
-def get_available_styles():
+def get_available_styles(nsfw=False):
     """Return list of available style/prompt-type names."""
-    return ["Any"] + sorted(STYLE_INSTRUCTIONS.keys())
+    styles = sorted(STYLE_INSTRUCTIONS.keys())
+    if not nsfw:
+        styles = [s for s in styles if s not in ("Boudoir", "Erotica")]
+    return ["Any"] + styles
 
 
-def get_available_moods():
+def get_available_moods(nsfw=False):
     """Return list of available mood names."""
-    return ["Any"] + sorted(MOOD_MODIFIERS.keys())
+    moods = sorted(MOOD_MODIFIERS.keys())
+    if not nsfw:
+        moods = [m for m in moods if m not in ("Sensual", "Provocative")]
+    return ["Any"] + moods

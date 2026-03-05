@@ -179,7 +179,10 @@ def clear_all():
 
 
 def delete(element_id):
-    """Delete an element by ID. Returns True if found and deleted."""
+    """Delete an element by ID. Also cleans up its embeddings_cache entry.
+
+    Returns True if found and deleted.
+    """
     db = database.get_db()
     lib_id = library_manager.get_library_id()
     lock = database.write_lock()
@@ -189,8 +192,16 @@ def delete(element_id):
             "DELETE FROM elements WHERE library_id=? AND id=?",
             (lib_id, element_id)
         )
+        if cursor.rowcount > 0:
+            db.execute(
+                "DELETE FROM embeddings_cache WHERE library_id=? AND element_id=?",
+                (lib_id, element_id)
+            )
         db.commit()
     return cursor.rowcount > 0
+
+
+_UPDATABLE_COLUMNS = {"desc", "tags", "attributes", "is_photograph"}
 
 
 def update(element_id, updates):
@@ -204,17 +215,19 @@ def update(element_id, updates):
         set_parts = []
         params = []
         for key, value in updates.items():
-            if key in ("tags",):
+            if key not in _UPDATABLE_COLUMNS:
+                continue
+            if key == "tags":
                 set_parts.append(f"{key}=?")
                 params.append(json.dumps(value))
-            elif key in ("attributes",):
+            elif key == "attributes":
                 set_parts.append(f"{key}=?")
                 params.append(json.dumps(value))
             elif key == "is_photograph":
                 set_parts.append(f"{key}=?")
                 params.append(1 if value else 0)
             else:
-                set_parts.append(f'"{key}"=?')
+                set_parts.append(f"{key}=?")
                 params.append(value)
 
         if not set_parts:
@@ -237,16 +250,32 @@ def update(element_id, updates):
 
 
 def delete_by_thumbnail(thumbnail):
-    """Delete all elements associated with a thumbnail. Returns count removed."""
+    """Delete all elements associated with a thumbnail. Also cleans up embeddings.
+
+    Returns count of elements removed.
+    """
     db = database.get_db()
     lib_id = library_manager.get_library_id()
     lock = database.write_lock()
 
     with lock:
+        # Collect element IDs before deleting so we can clean up embeddings
+        rows = db.execute(
+            "SELECT id FROM elements WHERE library_id=? AND thumbnail=?",
+            (lib_id, thumbnail)
+        ).fetchall()
+        element_ids = [r["id"] for r in rows]
+
         cursor = db.execute(
             "DELETE FROM elements WHERE library_id=? AND thumbnail=?",
             (lib_id, thumbnail)
         )
+        # Clean up embeddings for deleted elements
+        for eid in element_ids:
+            db.execute(
+                "DELETE FROM embeddings_cache WHERE library_id=? AND element_id=?",
+                (lib_id, eid)
+            )
         db.commit()
     return cursor.rowcount
 

@@ -49,6 +49,7 @@ except Exception:
 def _get_library(request):
     """Read X-Library header and scope the request to that library.
 
+    Raises HTTPBadRequest if X-Library header is invalid.
     Raises HTTPServiceUnavailable if no library exists (fresh install).
     """
     from .core import library_manager
@@ -56,8 +57,8 @@ def _get_library(request):
     if name:
         try:
             library_manager.set_request_library(name)
-        except ValueError:
-            pass
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=f"Invalid X-Library header: {e}")
     if library_manager.get_active() is None:
         raise web.HTTPServiceUnavailable(
             text="No library exists — open the Prompt808 sidebar to create one")
@@ -106,12 +107,26 @@ if _HAS_PROMPT_SERVER:
         _get_library(request)
 
         def _sync():
+            from .core import database
             from .core.generator import get_available_moods, get_available_styles
             from .core.model_manager import get_model_names
             from .store import archetypes
+
+            # Read NSFW setting to filter adult content from dropdowns
+            nsfw = False
+            try:
+                db = database.get_db()
+                row = db.execute(
+                    "SELECT value FROM generate_settings WHERE key='app'"
+                ).fetchone()
+                if row and row["value"]:
+                    nsfw = json.loads(row["value"]).get("nsfw", False)
+            except Exception as e:
+                log.warning("Failed to read NSFW setting: %s", e)
+
             return {
-                "prompt_types": get_available_styles(),
-                "moods": get_available_moods(),
+                "prompt_types": get_available_styles(nsfw=nsfw),
+                "moods": get_available_moods(nsfw=nsfw),
                 "archetypes": ["Any"] + archetypes.get_names(),
                 "models": get_model_names(),
             }
@@ -219,7 +234,12 @@ if _HAS_PROMPT_SERVER:
                 elif name == "attention_mode":
                     attention_mode = val
                 elif name == "max_tokens":
-                    max_tokens = int(val)
+                    try:
+                        max_tokens = int(val)
+                    except (ValueError, TypeError):
+                        return web.Response(status=400, text="max_tokens must be an integer")
+                    if not (256 <= max_tokens <= 4096):
+                        return web.Response(status=400, text="max_tokens must be between 256 and 4096")
                 elif name == "force":
                     force = val.lower() in ("true", "1", "yes")
 
@@ -765,6 +785,7 @@ if _HAS_PROMPT_SERVER:
         try:
             reader = await request.multipart()
             file_data = None
+            file_name = None
             target_name = None
             while True:
                 field = await reader.next()
@@ -772,6 +793,7 @@ if _HAS_PROMPT_SERVER:
                     break
                 if field.name == "file":
                     file_data = await field.read()
+                    file_name = field.filename
                 elif field.name == "name":
                     target_name = (await field.read()).decode()
         except Exception as e:
@@ -779,6 +801,15 @@ if _HAS_PROMPT_SERVER:
             return web.Response(status=400, text=f"Invalid upload: {e}")
         if file_data is None:
             return web.Response(status=400, text="No file uploaded")
+        # Derive library name from the uploaded filename (strip .p808 extension).
+        # An explicit target_name (from form data) takes priority, then filename,
+        # then the handler falls back to metadata inside the file.
+        if not target_name and file_name:
+            name = file_name
+            if name.lower().endswith(".p808"):
+                name = name[:-5]
+            if name.strip():
+                target_name = name.strip()
         result = await asyncio.to_thread(handle_import, file_data, target_name)
         return web.json_response(result)
 
@@ -791,7 +822,7 @@ if _HAS_PROMPT_SERVER:
         filename = request.match_info["filename"]
         img_dir = (Path(__file__).resolve().parent.parent / "docs" / "img").resolve()
         img_path = (img_dir / filename).resolve()
-        if not str(img_path).startswith(str(img_dir)):
+        if not img_path.is_relative_to(img_dir):
             return web.Response(status=403, text="Forbidden")
         if not img_path.is_file():
             return web.Response(status=404, text="Not found")
@@ -804,8 +835,7 @@ if _HAS_PROMPT_SERVER:
         filename = request.match_info["filename"]
         thumbs_dir = library_manager.get_thumbnails_dir()
         thumb_path = (thumbs_dir / filename).resolve()
-        safe_prefix = str(thumbs_dir.resolve())
-        if not str(thumb_path).startswith(safe_prefix):
+        if not thumb_path.is_relative_to(thumbs_dir.resolve()):
             return web.Response(status=403, text="Forbidden")
         if not thumb_path.is_file():
             return web.Response(status=404, text="Thumbnail not found")

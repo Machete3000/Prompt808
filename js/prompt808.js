@@ -72,6 +72,11 @@ export function getLibraryState() {
   return _libraryState;
 }
 
+/** Notify bridge nodes that dropdown options may have changed. */
+function notifyNodeRefresh() {
+  document.dispatchEvent(new CustomEvent("prompt808:options-changed"));
+}
+
 export { invalidateData, refreshLibraries };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +101,7 @@ function _renderLibSwitcher() {
           toast(`Library "${name.trim()}" created`, "success");
           await refreshLibraries();
           invalidateData();
+          notifyNodeRefresh();
           _switchTab("analyze");
         } catch (err) {
           toast("Create failed: " + err.message, "error");
@@ -156,6 +162,7 @@ function _renderLibSwitcher() {
         toast(`Library "${name.trim()}" created`, "success");
         await refreshLibraries();
         invalidateData();
+        notifyNodeRefresh();
         _switchTab(_activeTab);
       } catch (err) {
         toast("Create failed: " + err.message, "error");
@@ -178,6 +185,7 @@ function _renderLibSwitcher() {
         toast(`Renamed to "${newName.trim()}"`, "success");
         await refreshLibraries();
         invalidateData();
+        notifyNodeRefresh();
         _switchTab(_activeTab);
       } catch (err) {
         toast("Rename failed: " + err.message, "error");
@@ -203,6 +211,7 @@ function _renderLibSwitcher() {
           toast(`Library "${active}" deleted`, "success");
           await refreshLibraries();
           invalidateData();
+          notifyNodeRefresh();
           _switchTab(_activeTab);
         } catch (err) {
           toast("Delete failed: " + err.message, "error");
@@ -237,6 +246,7 @@ function _renderLibSwitcher() {
           toast(msg, "success");
           await refreshLibraries();
           invalidateData();
+          notifyNodeRefresh();
           _switchTab(_activeTab);
         }
       } catch (err) {
@@ -395,9 +405,12 @@ app.registerExtension({
       name: "NSFW Content",
       type: "boolean",
       defaultValue: false,
-      tooltip: "Show adult content styles (Boudoir, Erotica) and moods (Sensual, Provocative) in the Generate panel and node dropdowns. Changes apply to node dropdowns after page reload.",
+      tooltip: "Show adult content styles (Boudoir, Erotica) and moods (Sensual, Provocative) in the Generate panel and node dropdowns.",
       onChange: (value) => {
-        api.saveAppSettings({ nsfw: value }).catch(() => {});
+        api.saveAppSettings({ nsfw: value }).then(() => notifyNodeRefresh()).catch(() => {
+          toast("Failed to save NSFW setting — change may not persist after restart", "error");
+          notifyNodeRefresh();
+        });
       },
     },
     {

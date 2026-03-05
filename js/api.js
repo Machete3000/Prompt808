@@ -236,12 +236,14 @@ export async function exportLibrary(includeThumbnails = true) {
   const blob = await res.blob();
   const name = _activeLibrary || "library";
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  const blobUrl = URL.createObjectURL(blob);
+  a.href = blobUrl;
   a.download = `${name}.p808`;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(a.href);
+  // Defer revocation so the browser has time to start the download
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
   return { status: "downloaded", filename: `${name}.p808` };
 }
 

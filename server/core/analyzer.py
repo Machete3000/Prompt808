@@ -425,8 +425,8 @@ def process_and_commit(analysis_result, element_store, vocabulary_store,
         try:
             from . import prompt_cache
             prompt_cache.invalidate()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Prompt cache invalidation failed: %s", e)
 
     return {
         "added": added,
@@ -500,7 +500,7 @@ def _normalize_elements(raw_elements, image_path, subject_type,
         tags = elem.get("tags", [])
         if isinstance(tags, str):
             tags = [t.strip() for t in tags.split(",")]
-        tags = [_normalize_tag_format(t) for t in tags if t]
+        tags = [t for t in (_normalize_tag_format(t) for t in tags if t) if t]
 
         # Build normalized element
         normalized.append({
