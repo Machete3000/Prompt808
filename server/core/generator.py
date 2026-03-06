@@ -270,6 +270,9 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
             elements_used: List of element IDs used.
             status: Description of outcome.
     """
+    # Strip display prefix (e.g. "Photo-Cinematic" → "Cinematic")
+    style = _strip_style_prefix(style)
+
     # Resolve "Any" style to a concrete one using the seed
     all_styles = PHOTO_STYLES + ["Native"]
     if not nsfw:
@@ -794,12 +797,22 @@ def _build_negative(style, archetype=None, llm_negatives=None,
     return ", ".join(sorted(parts))
 
 
+def _display_style(name):
+    """Add 'Photo-' prefix to photo styles for display (skip Any/Native)."""
+    return name if name in ("Any", "Native") else f"Photo-{name}"
+
+
+def _strip_style_prefix(name):
+    """Strip 'Photo-' display prefix to recover the internal style name."""
+    return name[6:] if name.startswith("Photo-") else name
+
+
 def get_available_styles(nsfw=False):
-    """Return list of available style/prompt-type names."""
+    """Return list of available style/prompt-type names for display."""
     styles = sorted(STYLE_INSTRUCTIONS.keys())
     if not nsfw:
         styles = [s for s in styles if s not in ("Boudoir", "Erotica")]
-    return ["Any"] + styles
+    return ["Any"] + sorted(_display_style(s) for s in styles)
 
 
 def get_available_moods(nsfw=False):

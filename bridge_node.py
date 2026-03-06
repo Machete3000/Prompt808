@@ -9,8 +9,9 @@ import logging
 
 log = logging.getLogger("prompt808.node")
 
-PROMPT_TYPES = ["Any", "Architectural", "Boudoir", "Cinematic", "Documentary", "Erotica",
-                "Fashion", "Fine Art", "Native", "Portrait", "Street"]
+PROMPT_TYPES = ["Any", "Native", "Photo-Architectural", "Photo-Boudoir", "Photo-Cinematic",
+                "Photo-Documentary", "Photo-Erotica", "Photo-Fashion", "Photo-Fine Art",
+                "Photo-Portrait", "Photo-Street"]
 MOODS = ["Any", "Dramatic", "Elegant", "Ethereal", "Gritty", "Melancholic",
          "Mysterious", "Provocative", "Romantic", "Sensual", "Serene"]
 QUANTIZATIONS = ["FP16", "FP8", "8-bit", "4-bit"]
@@ -90,7 +91,7 @@ class Prompt808Generate:
         except Exception:
             pass
 
-        prompt_types = PROMPT_TYPES if nsfw else [t for t in PROMPT_TYPES if t not in ("Boudoir", "Erotica")]
+        prompt_types = PROMPT_TYPES if nsfw else [t for t in PROMPT_TYPES if t not in ("Photo-Boudoir", "Photo-Erotica")]
         moods = MOODS if nsfw else [m for m in MOODS if m not in ("Sensual", "Provocative")]
 
         return {
@@ -292,10 +293,13 @@ class Prompt808Generate:
         except Exception as e:
             log.warning("Failed to read NSFW setting: %s", e)
 
+        # Strip display prefix (e.g. "Photo-Cinematic" → "Cinematic")
+        style = prompt_type[6:] if prompt_type.startswith("Photo-") else prompt_type
+
         result = generator.generate_prompt(
             seed=seed,
             archetype_id=archetype,
-            style=prompt_type,
+            style=style,
             mood=mood,
             model_name=llm_model,
             quantization=quantization,
