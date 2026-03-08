@@ -15,7 +15,7 @@ PROMPT_TYPES = ["Any", "Native", "Photo-Architectural", "Photo-Boudoir", "Photo-
 MOODS = ["Any", "Dramatic", "Elegant", "Ethereal", "Gritty", "Melancholic",
          "Mysterious", "Provocative", "Romantic", "Sensual", "Serene"]
 QUANTIZATIONS = ["FP16", "FP8", "8-bit", "4-bit"]
-ENRICHMENTS = ["Baseline", "Vivid", "Expressive", "Poetic", "Lyrical", "Freeform"]
+ENRICHMENTS = ["Any", "Baseline", "Vivid", "Expressive", "Poetic", "Lyrical", "Freeform"]
 
 
 class Prompt808Generate:
@@ -125,7 +125,7 @@ class Prompt808Generate:
                     "tooltip": "LLM model for prompt composition (None = simple mode)",
                 }),
                 "enrichment": (ENRICHMENTS, {
-                    "default": "Vivid",
+                    "default": "Any",
                     "tooltip": "Creative enrichment level for LLM composition",
                 }),
                 "quantization": (QUANTIZATIONS, {

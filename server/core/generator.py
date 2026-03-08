@@ -281,6 +281,11 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
         style_rng = random.Random(seed)
         style = style_rng.choice(all_styles)
 
+    # Resolve "Any" enrichment to a concrete level using the seed
+    if enrichment == "Any":
+        enrichment_rng = random.Random(seed + 1)
+        enrichment = enrichment_rng.choice(list(ENRICHMENT_LEVELS.keys()))
+
     # Resolve archetype name early (needed for both cache hit and miss paths)
     archetype = None
     archetype_name = "Any"
