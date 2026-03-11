@@ -1,16 +1,16 @@
 # Prompt808
 
-**Vision-LLM prompt generation for ComfyUI** — analyze your images, build a personal style library, and generate prompts that match your aesthetic.
+**Vision-LLM prompt generation for ComfyUI** — analyze images, build style libraries, and generate prompts that match any aesthetic.
 
 ## What It Does
 
-Prompt808 learns from your images. Drop in reference photos or artwork, and a vision model extracts the elements that define each image — lighting, composition, palette, mood, and more. Those elements become a growing library that Prompt808 draws from to generate prompts tailored to your visual style.
+Prompt808 learns content and styles from images. Drop in reference photos or artwork, and a vision model extracts the elements that define each image — lighting, composition, palette, mood, and more. Those elements become a growing library that Prompt808 draws from to generate prompts tailored to any visual style.
 
 ## Features
 
-- **Learns from your images** — A vision model analyzes each upload and extracts structured scene elements into a growing library
-- **Multiple prompt styles** — Cinematic, Fine Art, Fashion, Documentary, Portrait, Street, Architectural, and more
-- **LLM-powered composition** — Natural-language prompts with seven enrichment levels from faithful reproduction to full creative freedom
+- **Learns from images** — A vision model analyzes each upload and extracts structured scene elements into a growing library
+- **Multiple prompt styles** — Photo-Architectural, Photo-Boudoir, Photo-Cinematic, Photo-Documentary, Photo-Fashion, Photo-Fine Art, Photo-Portrait, Photo-Street, plus Native (any medium) and an Any option for random selection
+- **Optional LLM-powered composition** — Natural-language prompts with seven enrichment levels from faithful reproduction to full creative freedom
 - **Multi-library generation** — Combine elements from multiple libraries in a single generation using the Select Libraries node, or select "All" for every library at once
 - **Library management** — Maintain separate libraries for different projects or genres, each fully isolated. Export and import libraries as `.p808` files for backup or sharing
 - **ComfyUI native** — Sidebar panel for interactive use, plus a workflow node for automated generation
@@ -46,7 +46,7 @@ Click the camera icon in ComfyUI's sidebar to open the Prompt808 panel. On first
 
 Navigate to the **Analyze** tab. Add images by:
 
-- Drag and drop from your file manager
+- Drag and drop from a file manager
 - Click to browse
 - Drag images from a browser window
 - Paste from clipboard (Ctrl+V)
@@ -55,7 +55,7 @@ Supported formats: JPG, PNG, WebP, BMP, TIFF, HEIC. Batch upload is supported �
 
 ![Analyze tab](docs/screenshots/analyze.png)
 
-### 3. Browse your library
+### 3. Browse the library
 
 The **Library** tab shows all extracted elements. Filter by category, edit descriptions and tags, or delete elements.
 
@@ -65,7 +65,7 @@ The **Photos** tab displays thumbnails of all analyzed images. Click a photo to 
 
 ### 4. Generate prompts
 
-Add a **Generate Prompt** node to your ComfyUI workflow. All generation settings are exposed as node inputs — library, style, mood, archetype, LLM model, enrichment, temperature, and more.
+Add a **Generate Prompt** node to your ComfyUI workflow. All generation settings are exposed as node inputs — library, style, mood, archetype, archetype influence, LLM model, enrichment, temperature, and more. Each archetype also has an **"All Elements"** option that biases toward every element in that archetype's categories.
 
 ![Node in workflow](docs/screenshots/node-workflow.png)
 
@@ -90,22 +90,31 @@ To generate prompts that draw from multiple libraries at once:
 
 When multiple libraries are selected, their elements, archetypes, and style profiles are merged into a virtual combined pool for generation.
 
+### 7. Settings
+
+Open **Settings > Prompt808 > General** in ComfyUI to configure:
+
+- **NSFW** — Enable mature content in prompt types and moods
+- **Balance Libraries** (default: on) — When generating from multiple libraries, each library contributes equally regardless of size. A small 30-element library gets the same representation as a 3,000-element library. Turn off to let larger libraries dominate naturally. Has no effect with a single library
+
+Changes take effect immediately — no restart required.
+
 ## Models
 
 ### Vision Models (analysis)
 
-| Model                            | VRAM    | Notes                                           |
-| -------------------------------- | ------- | ----------------------------------------------- |
-| Qwen3-VL-8B-Instruct             | ~12 GB  | Default, good quality                           |
-| Qwen3-VL-8B-Instruct-abliterated | ~12 GB  | Abliterated variant for unrestricted extraction |
-| Qwen3-VL-8B-Instruct-abliterated-v2 | ~12 GB | Alternative abliterated variant                |
-| Qwen3-VL-8B-Instruct-FP8         | ~7.5 GB | Pre-quantized, good for 8 GB cards              |
-| Qwen3-VL-8B-Thinking             | ~12 GB  | Chain-of-thought reasoning                      |
-| Qwen3-VL-8B-Thinking-FP8         | ~7.5 GB | Thinking model, pre-quantized                   |
-| Qwen3-VL-32B-Instruct            | ~28 GB  | Higher quality extraction                       |
-| Qwen3-VL-32B-Instruct-FP8        | ~24 GB  | Pre-quantized 32B                               |
-| Qwen3-VL-32B-Thinking            | ~28 GB  | Best quality, chain-of-thought                  |
-| Qwen3-VL-32B-Thinking-FP8        | ~24 GB  | Thinking 32B, pre-quantized                     |
+| Model                               | VRAM    | Notes                                           |
+| ----------------------------------- | ------- | ----------------------------------------------- |
+| Qwen3-VL-8B-Instruct                | ~12 GB  | Default, good quality                           |
+| Qwen3-VL-8B-Instruct-abliterated    | ~12 GB  | Abliterated variant for unrestricted extraction |
+| Qwen3-VL-8B-Instruct-abliterated-v2 | ~12 GB  | Alternative abliterated variant                 |
+| Qwen3-VL-8B-Instruct-FP8            | ~7.5 GB | Pre-quantized, good for 8 GB cards              |
+| Qwen3-VL-8B-Thinking                | ~12 GB  | Chain-of-thought reasoning                      |
+| Qwen3-VL-8B-Thinking-FP8            | ~7.5 GB | Thinking model, pre-quantized                   |
+| Qwen3-VL-32B-Instruct               | ~28 GB  | Higher quality extraction                       |
+| Qwen3-VL-32B-Instruct-FP8           | ~24 GB  | Pre-quantized 32B                               |
+| Qwen3-VL-32B-Thinking               | ~28 GB  | Best quality, chain-of-thought                  |
+| Qwen3-VL-32B-Thinking-FP8           | ~24 GB  | Thinking 32B, pre-quantized                     |
 
 Vision models with non-standard tensor dimensions automatically fall back from FP8 to FP16 if block quantization is incompatible.
 

@@ -4,6 +4,11 @@ Registers the Prompt808 Generate node and all API routes on PromptServer.
 """
 
 import logging
+import re
+from pathlib import Path
+
+_pyproject = (Path(__file__).parent / "pyproject.toml").read_text(encoding="utf-8")
+__version__ = re.search(r'^version\s*=\s*"([^"]+)"', _pyproject, re.MULTILINE).group(1)
 
 log = logging.getLogger("prompt808")
 

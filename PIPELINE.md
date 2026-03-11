@@ -81,7 +81,7 @@ user_data/
 | `embeddings_cache`       | Sentence-transformer embeddings (BLOB, 384 floats)                      |
 | `image_embeddings_cache` | CLIP image embeddings (BLOB, 512 floats)                                |
 | `prompt_cache`           | Deterministic prompt cache keyed by input hash                          |
-| `generate_settings`      | App-wide settings (NSFW, debug) |
+| `generate_settings`      | App-wide settings (NSFW, debug, balance_libraries) |
 
 The database uses WAL journal mode for concurrent reads with serialized writes via a single `threading.Lock`. All embeddings are stored as raw binary BLOBs (`np.float32.tobytes()`), which is ~6x smaller than JSON float arrays.
 
@@ -422,9 +422,23 @@ For each cluster, an archetype dict is constructed:
 
 ### Naming
 
-Archetypes are named using a `"{Setting} {Light_Style}"` pattern from the most frequent environment and lighting tags, with display name overrides for readability.
+Archetypes are named using **TF-IDF distinctive tag scoring** across all sibling archetypes in the same library. For each archetype, every tag from naming-eligible categories (mood, environment, lighting, palette) is scored:
 
-Optional LLM naming can override this with a 3-5 word creative name.
+```
+score = TF × IDF × category_priority
+```
+
+- **TF** — Tag frequency within this cluster (how representative is the tag)
+- **IDF** — Inverse document frequency across sibling clusters (how unique is the tag to this cluster)
+- **Category priority** — Mood (1.5) > environment (1.3) > lighting (1.0) > palette (0.8)
+
+Up to 3 highest-scoring tags from **different** categories are selected, with a word-overlap check to prevent stuttering (e.g., "Studio Studio Light"). Tags are sorted by natural word order (environment → mood → palette → lighting) and joined into the name.
+
+A disambiguation pass resolves any remaining duplicate names within a library by appending a distinguishing tag unique to each cluster. If no unique tag exists, a numeric suffix (I, II, III) is used as a last resort.
+
+Generic tags (e.g., `soft_light`, `minimalist`, `indoor`, `skin_tone`) are excluded from naming via a skip list.
+
+Optional LLM naming can override this — when enabled, the distinctive tags are passed as context to the LLM, which composes a 3-5 word evocative name.
 
 ---
 
@@ -443,16 +457,23 @@ The cache is invalidated whenever the element library changes.
 
 ### 2. Archetype Resolution & Element Filtering
 
-If a specific archetype is selected (not "Any"), its elements are loaded:
+If a specific archetype is selected (not "Any"), a **favored set** of element object identities is computed by `_get_archetype_element_ids()`:
 
-1. **ID matching** — Elements whose IDs are in the archetype's `element_ids` list are included.
-2. **Tag matching** — Additional elements matching the archetype's `compatible` tags are also included.
-3. **Negative hint exclusion** — Elements with tags matching `negative_hints` are excluded.
-4. **Fallback** — If fewer than 3 elements match, all library elements are used.
+1. **Direct ID matching** — Elements whose IDs are in the archetype's `element_ids` list are included, but only if they belong to the **same library** as the archetype. This prevents cross-library ID collisions when multiple libraries are merged into a single pool.
+2. **Tag matching** — Elements matching the archetype's `compatible` tags are included cross-library. A minimum overlap threshold prevents overly broad matches: `max(2, ⌊len(arch_tags) × 0.2⌋)` matching tags required for tag lists of 5+ tags, or 1 tag for smaller lists.
+3. **Negative hint exclusion** — Elements with tags matching `negative_hints` are excluded from both matching methods.
 
-If "Any" is selected, all library elements are used.
+The favored set is used for **weighting**, not filtering — an empty favored set means uniform random selection across all elements.
 
-**Native style filtering:** When the "Native" style is selected, only elements with `is_photograph=false` metadata (or no metadata) are used. When a photography style is selected, only photographic elements are used.
+If "Any" is selected, all library elements are used with no favored set.
+
+**Native style filtering:** Native means "truthful to source medium." The Native pool includes elements matching any of three rules:
+
+1. `extraction_type="native"` — non-photo art's native description
+2. `is_photograph=true` — for photographs, the photo-pass extraction IS the native description
+3. `extraction_type` is NULL — curated/universal elements (e.g. poses from `.p808` imports) that are medium-agnostic
+
+For non-photo art (3D renders, paintings), only their `extraction_type="native"` elements are included (their photo-pass descriptions are excluded since those misrepresent the medium). Camera-category elements are always excluded from the Native pool since lens/f-stop specs don't apply when the pool may contain non-photography art. If no native elements exist, all non-camera elements are used as fallback. When a photography style is selected, only non-native elements (`extraction_type != "native"`) are used.
 
 ### 3. Frequency-Weighted Element Selection
 
@@ -460,7 +481,7 @@ If "Any" is selected, all library elements are used.
 
 Elements are grouped by category. Selection uses a seeded RNG for deterministic output:
 
-**Tier 1 categories** (environment, lighting, camera, technique, palette, composition, mood) are **always** included — one random element per category.
+**Tier 1 categories** (environment, lighting, camera, technique, palette, composition, mood) are **always** included — one element per category.
 
 **Tier 2 categories** (pose, hair, expression, clothing, tattoos, accessories, etc.) are included **probabilistically**, based on their photo fraction:
 
@@ -473,7 +494,38 @@ This means:
 - `pose` present in 93% of photos → included in ~93% of prompts
 - `tattoos` present in 3% of photos → included in ~3% of prompts
 
-Within each included category, one element is chosen uniformly at random.
+Within each included category, element selection is controlled by `_pick_element()`, which handles archetype weighting and library balancing.
+
+#### Archetype Influence
+
+**Node input:** Archetype Influence (0–100%, default 70%) on the Generate Prompt node.
+
+When an archetype is selected, the favored set biases element selection via **adaptive per-category weighting**. The formula auto-scales the weight based on the ratio of favored to non-favored elements in each category:
+
+```
+weight = target_p × n_other / (n_favored × (1 - target_p))
+weight = max(1.0, weight)   # never downweight favored elements
+```
+
+- **Sparse categories** (few favored elements in a large pool) get high weights to reach the target probability
+- **Broad categories** (many favored elements) get weight clamped to 1.0 (no boost needed)
+- At **100% influence**, only favored elements are selected; categories with no favored elements are skipped
+- At **0% influence**, selection is uniform across all elements
+
+**Tier 2 floor behavior:** Archetype influence also acts as a minimum inclusion probability for Tier 2 categories that the archetype covers. For example, a pose-only archetype at 80% guarantees the `poses` category is included in at least 80% of prompts, even if poses appear in only 3% of analyzed photos. The formula: `weight = max(photo_fraction, archetype_influence)` for favored categories.
+
+#### Balance Libraries
+
+**Setting:** Balance Libraries toggle in Settings > Prompt808 > General (default: on).
+
+When enabled with multiple libraries in play, element selection uses a two-stage process to give each library equal representation regardless of size:
+
+1. Pick a library uniformly at random
+2. Pick an element from that library
+
+Without this toggle, a library with 34 elements would be nearly invisible alongside one with 5,000.
+
+**Interaction with Archetype Influence:** When both features are active, the archetype decides first — with probability equal to the archetype influence, a favored element is chosen directly. Only the remaining non-favored picks (the `1 - influence` portion) use library balancing. This ensures archetypes maintain coherence while balancing applies to the creative-freedom portion of the selection.
 
 ### 4. Prompt Composition
 
@@ -483,8 +535,8 @@ The selected elements are composed via one of two paths:
 
 The chosen elements are formatted as a bullet list and sent to the text model with:
 
-- A **style instruction** (Architectural, Boudoir, Cinematic, Documentary, Erotica, Fashion, Fine Art, Native, Portrait, Street) that sets the linguistic register
-- A **mood modifier** (Dramatic, Elegant, Ethereal, Gritty, Melancholic, Mysterious, Provocative, Romantic, Sensual, Serene) that biases the atmosphere
+- A **style instruction** (Photo-Architectural, Photo-Boudoir, Photo-Cinematic, Photo-Documentary, Photo-Erotica, Photo-Fashion, Photo-Fine Art, Photo-Portrait, Photo-Street, or Native) that sets the linguistic register
+- A **mood modifier** (Dramatic, Elegant, Ethereal, Gritty, Melancholic, Mysterious, Provocative, Romantic, Sensual, Serene, or None) that biases the atmosphere. An "Any" option picks a random mood per generation
 - An **enrichment level** that controls creative freedom
 - A **style profile context** from the user's per-genre style data (if enough observations exist)
 - A **fidelity rule** instructing the LLM to reproduce all element descriptions faithfully without euphemizing, censoring, or omitting anatomical, sexual, or explicit content
@@ -581,7 +633,7 @@ Cache lookup (SHA256 of all inputs) --> hit? return cached
 Load all elements from library store
     |
     v
-Filter by archetype (ID match + tag match - negative hints)
+Build favored set (library-scoped ID match + tag match - negative hints)
     |
     v
 Filter by style (Native → non-photo elements; Photo styles → photo elements)
@@ -590,8 +642,14 @@ Filter by style (Native → non-photo elements; Photo styles → photo elements)
 Group by category, compute photo fractions
     |
     v
-Tier 1 categories: always select one element (seeded RNG)
-Tier 2 categories: include with P = photo_fraction, then select one
+Tier 1 categories: always select one element
+Tier 2 categories: include with P = max(photo_fraction, archetype_influence) for favored categories
+    |
+    v
+Per-category element selection (_pick_element):
+    |-- Archetype influence roll → favored element (if archetype active)
+    |-- Otherwise: balanced library pick (if Balance Libraries on)
+    |              or uniform pool pick (default)
     |
     v
 LLM available?
@@ -644,7 +702,7 @@ Invalid library names are logged and skipped. If all names are invalid, the node
 - **Archetypes** via `archetypes.get_all()`
 - **Style contexts** via `style_profile.get_style_context(genre)`
 
-All elements and archetypes are concatenated into flat lists. Style contexts are collected per genre.
+Each element is tagged with `_library` (its source library name) and each archetype with `_library`. All elements and archetypes are concatenated into flat lists. Style contexts are collected per genre.
 
 ### Wrapper Stores
 
@@ -868,8 +926,13 @@ Prompt808/                        # ComfyUI custom node
 │   ├── archetypes.js             # Archetypes tab (cluster viewer, regenerate)
 │   └── style.js                  # Style tab (per-genre style profiles, recalculate)
 ├── server/                       # Backend (aiohttp routes on ComfyUI's PromptServer)
-│   ├── routes.py                 # All API endpoints under /prompt808/api/*
+│   ├── routes.py                 # Route registration, delegates to api/ handlers
 │   ├── app.py                    # FastAPI app for testing
+│   ├── api/                      # Request handlers (split by domain)
+│   │   ├── analysis.py           # Analysis endpoints (upload, options, cleanup)
+│   │   ├── libraries.py          # Library CRUD endpoints
+│   │   ├── library.py            # Library data endpoints (elements, photos, archetypes)
+│   │   └── style.py              # Style profile endpoints
 │   ├── core/                     # Business logic
 │   │   ├── database.py           # SQLite singleton, schema, WAL mode, write lock
 │   │   ├── analyzer.py           # Medium detection + QwenVL extraction (dual pipeline)
@@ -969,8 +1032,8 @@ Generation is handled directly by the Generate Prompt node via `bridge_node.py`,
 
 | Method | Endpoint                  | Description                            |
 | ------ | ------------------------- | -------------------------------------- |
-| GET    | `/prompt808/api/settings` | Read app-wide settings (NSFW, debug)   |
-| PUT    | `/prompt808/api/settings` | Save app-wide settings (partial merge) |
+| GET    | `/prompt808/api/settings` | Read app-wide settings (NSFW, debug, balance_libraries) |
+| PUT    | `/prompt808/api/settings` | Save app-wide settings (partial merge)                                       |
 
 ### Health
 

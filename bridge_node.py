@@ -113,6 +113,19 @@ class Prompt808Generate:
                     "default": "Any",
                     "tooltip": "Archetype to filter elements by",
                 }),
+                "archetype_influence": ("INT", {
+                    "default": 70,
+                    "min": 0,
+                    "max": 100,
+                    "step": 5,
+                    "tooltip": "How strongly the selected archetype biases element selection (0-100%). "
+                               "Controls two things: (1) per-category probability of picking an "
+                               "archetype-matched element vs. a random pool element, and (2) minimum "
+                               "inclusion rate for categories the archetype covers -- e.g. a pose-only "
+                               "archetype at 80% guarantees poses appear in at least 80% of prompts. "
+                               "At 100%, ONLY archetype-matched categories are included. "
+                               "Has no effect when archetype is None.",
+                }),
                 "mood": (moods, {
                     "default": "Any",
                     "tooltip": "Mood modifier for the generated prompt",
@@ -173,10 +186,10 @@ class Prompt808Generate:
         return float("nan")  # Always re-execute
 
     def generate(self, seed=0, libraries=None, library="(no libraries)",
-                 prompt_type="Any", archetype="Any", mood="Any",
-                 llm_model="None", enrichment="Any", quantization="FP16",
-                 temperature=0.7, max_tokens=1024, keep_model_loaded=False,
-                 prefix="", suffix=""):
+                 prompt_type="Any", archetype="Any", archetype_influence=70,
+                 mood="Any", llm_model="None", enrichment="Any",
+                 quantization="FP16", temperature=0.7, max_tokens=1024,
+                 keep_model_loaded=False, prefix="", suffix=""):
         """Generate a prompt using node inputs."""
         try:
             from .server.core import library_manager
@@ -188,7 +201,7 @@ class Prompt808Generate:
             libraries, library, library_manager,
         )
         if isinstance(selected_libraries, tuple):
-            return selected_libraries  # early-exit error
+            raise RuntimeError(selected_libraries[2])  # halt workflow
 
         multi = len(selected_libraries) > 1
         library_display = ", ".join(selected_libraries) if multi else selected_libraries[0]
@@ -209,16 +222,16 @@ class Prompt808Generate:
                     log.warning("Failed to check element count: %s", e)
                     count = -1
                 if count == 0:
-                    msg = "Library is empty \u2014 open the Prompt808 sidebar and analyze some images first"
-                    log.warning(msg)
-                    parts = [p for p in [prefix.strip() if prefix else "",
-                                         suffix.strip() if suffix else ""] if p]
-                    return (" ".join(parts), "", msg)
+                    raise RuntimeError(
+                        "Library is empty \u2014 open the Prompt808 sidebar "
+                        "and analyze some images first"
+                    )
 
             result = self._generate_native(
                 seed=seed,
                 prompt_type=prompt_type,
                 archetype=archetype,
+                archetype_influence=archetype_influence,
                 mood=mood,
                 llm_model=llm_model,
                 enrichment=enrichment,
@@ -233,10 +246,20 @@ class Prompt808Generate:
 
             # Build status line
             model_display = llm_model if llm_model and llm_model != "None" else "None"
+
+            # Archetype display: "library: archetype" format
+            arch_name = result.get("archetype_used", "unknown")
+            arch_lib = result.get("archetype_library", selected_libraries[0])
+            if arch_name in ("None", "none", "unknown", "None (fallback)"):
+                arch_display = arch_name
+            else:
+                arch_display = f"{arch_lib}: {arch_name}"
+
             status = "\n".join([
                 f"library: {library_display}",
-                f"style: {result.get('style_used', 'unknown')}",
-                f"archetype: {result.get('archetype_used', 'unknown')}",
+                f"prompt type: {_display_prompt_type(result.get('style_used', prompt_type))}",
+                f"archetype: {arch_display}",
+                f"archetype influence: {archetype_influence}%",
                 f"mood: {result.get('mood_used', 'unknown')}",
                 f"model: {model_display}",
                 f"enrichment: {result.get('enrichment_used', 'unknown')}",
@@ -245,10 +268,11 @@ class Prompt808Generate:
             ])
 
             return (result.get("prompt", ""), result.get("negative_prompt", ""), status)
+        except RuntimeError:
+            raise  # expected errors (empty library, bad status) pass through
         except Exception as e:
-            error_msg = f"Prompt808 generation failed: {e}"
-            log.error(error_msg, exc_info=True)
-            return ("", "", f"ERROR: {error_msg}")
+            log.error("Prompt808 generation failed: %s", e, exc_info=True)
+            raise RuntimeError(f"Prompt808 generation failed: {e}") from e
         finally:
             library_manager._request_library.reset(token)
 
@@ -297,9 +321,9 @@ class Prompt808Generate:
 
         return ("", "", "No library selected")
 
-    def _generate_native(self, seed, prompt_type, archetype, mood, llm_model,
-                         enrichment, quantization, temperature, max_tokens,
-                         keep_model_loaded, prefix, suffix,
+    def _generate_native(self, seed, prompt_type, archetype, archetype_influence,
+                         mood, llm_model, enrichment, quantization, temperature,
+                         max_tokens, keep_model_loaded, prefix, suffix,
                          multi_libraries=None):
         """Direct Python call into the generation pipeline."""
         try:
@@ -331,12 +355,25 @@ class Prompt808Generate:
                 "SELECT value FROM generate_settings WHERE key='app'"
             ).fetchone()
             if row and row["value"]:
-                nsfw = json.loads(row["value"]).get("nsfw", False)
+                app_settings = json.loads(row["value"])
+                nsfw = app_settings.get("nsfw", False)
+            else:
+                app_settings = {}
         except Exception as e:
-            log.warning("Failed to read NSFW setting: %s", e)
+            log.warning("Failed to read app settings: %s", e)
+            app_settings = {}
+
+        # Node input is 0-100, generator expects 0.0-1.0
+        archetype_influence = archetype_influence / 100.0
+        balance_libraries = app_settings.get("balance_libraries", True)
 
         # Strip display prefix (e.g. "Photo-Cinematic" → "Cinematic")
         style = prompt_type[6:] if prompt_type.startswith("Photo-") else prompt_type
+
+        # Parse prefixed archetype (e.g. "LibA: Studio Portrait" → library + name)
+        archetype_library = None
+        if archetype not in ("Any", "None") and ": " in archetype:
+            archetype_library, archetype = archetype.split(": ", 1)
 
         # Resolve stores — merged wrappers for multi-library, real modules otherwise
         if multi_libraries:
@@ -347,6 +384,16 @@ class Prompt808Generate:
             elem_store = elements
             arch_store = archetypes
             style_mod = style_profile
+
+        # Resolve library-scoped archetype to its unique ID.
+        # If the target library isn't in the selected set, fall back to "None"
+        # rather than accidentally matching a same-named archetype elsewhere.
+        if archetype_library and hasattr(arch_store, "get_by_name_and_library"):
+            resolved = arch_store.get_by_name_and_library(archetype, archetype_library)
+            if resolved:
+                archetype = resolved.get("id", archetype)
+            else:
+                archetype = "None"
 
         result = generator.generate_prompt(
             seed=seed,
@@ -364,8 +411,22 @@ class Prompt808Generate:
             style_profile_module=style_mod,
             debug=False,
             nsfw=nsfw,
+            archetype_influence=archetype_influence,
+            balance_libraries=balance_libraries,
         )
+
+        status = result.get("status", "")
+        if status and status != "ok":
+            raise RuntimeError(f"Generation failed ({status})")
+
         result["seed"] = seed
+
+        # Resolve which library the archetype belongs to
+        arch_used = result.get("archetype_used", "None")
+        if arch_used not in ("None", "none", "unknown", "None (fallback)"):
+            found = arch_store.get_by_name(arch_used)
+            if found and found.get("_library"):
+                result["archetype_library"] = found["_library"]
 
         # Apply prefix/suffix (even if prompt is empty, so LoRA triggers etc. survive)
         if prefix or suffix:
@@ -392,6 +453,19 @@ class Prompt808Generate:
 
 
 # ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+
+def _display_prompt_type(style):
+    """Map internal style name to display prompt type with Photo- prefix."""
+    try:
+        from .server.core.generator import _display_style
+    except ImportError:
+        from server.core.generator import _display_style
+    return _display_style(style)
+
+
 # Multi-library merging
 # ------------------------------------------------------------------
 
@@ -431,6 +505,14 @@ class _MergedArchetypeStore:
             (a for a in self._archetypes if a.get("name") == name), None,
         )
 
+    def get_by_name_and_library(self, name, library_name):
+        """Find an archetype by name scoped to a specific library."""
+        return next(
+            (a for a in self._archetypes
+             if a.get("name") == name and a.get("_library") == library_name),
+            None,
+        )
+
     def get_names(self):
         return [a.get("name") or a.get("id") for a in self._archetypes]
 
@@ -441,6 +523,9 @@ class _MergedStyleProfile:
     def __init__(self, contexts, seed):
         self._contexts = contexts  # {genre: [context_str, ...]}
         self._seed = seed
+
+    def get_all_genres(self):
+        return list(self._contexts.keys())
 
     def get_style_context(self, genre, max_traits=5):
         available = [c for c in self._contexts.get(genre, []) if c]
@@ -470,10 +555,16 @@ def _gather_multi_library_data(library_names, elements_mod, archetypes_mod,
         token = library_manager._request_library.set(lib_name)
         try:
             lib_elements = elements_mod.get_all()
-            all_elements.extend(lib_elements)
+            for elem in lib_elements:
+                tagged = dict(elem)
+                tagged["_library"] = lib_name
+                all_elements.append(tagged)
 
             lib_archetypes = archetypes_mod.get_all()
-            all_archetypes.extend(lib_archetypes)
+            for arch in lib_archetypes:
+                tagged = dict(arch)
+                tagged["_library"] = lib_name
+                all_archetypes.append(tagged)
 
             lib_version = elements_mod.get_library_version()
             version_parts.append(f"{lib_name}={lib_version}")

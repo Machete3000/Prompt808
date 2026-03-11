@@ -83,13 +83,16 @@ if _HAS_PROMPT_SERVER:
                 pass
 
         def _sync():
+            from .. import __version__
             active = library_manager.get_active()
             if active is None:
-                return {"status": "ok", "elements": 0, "archetypes": 0,
+                return {"status": "ok", "version": __version__,
+                        "elements": 0, "archetypes": 0,
                         "vocabulary": 0, "library": None}
             from .store import archetypes, elements, vocabulary
             return {
                 "status": "ok",
+                "version": __version__,
                 "elements": elements.count(),
                 "archetypes": archetypes.count(),
                 "vocabulary": vocabulary.count(),
@@ -104,7 +107,13 @@ if _HAS_PROMPT_SERVER:
 
     @routes.get("/prompt808/api/generate/options")
     async def generation_options(request):
-        _get_library(request)
+        from .core import library_manager
+
+        lib_header = request.headers.get("X-Library", "")
+        is_multi = lib_header == "All"
+
+        if not is_multi:
+            _get_library(request)
 
         def _sync():
             from .core import database
@@ -124,10 +133,26 @@ if _HAS_PROMPT_SERVER:
             except Exception as e:
                 log.warning("Failed to read NSFW setting: %s", e)
 
+            # Build archetype list — merged from all libraries when "All"
+            if is_multi:
+                arch_names = []
+                for lib_info in library_manager.list_libraries():
+                    token = library_manager._request_library.set(lib_info["name"])
+                    try:
+                        names = archetypes.get_names()
+                        arch_names.extend(
+                            f"{lib_info['name']}: {n}" for n in names
+                        )
+                    finally:
+                        library_manager._request_library.reset(token)
+                archetype_list = ["Any", "None"] + arch_names
+            else:
+                archetype_list = ["Any", "None"] + archetypes.get_names()
+
             return {
                 "prompt_types": get_available_styles(nsfw=nsfw),
                 "moods": get_available_moods(nsfw=nsfw),
-                "archetypes": ["Any", "None"] + archetypes.get_names(),
+                "archetypes": archetype_list,
                 "models": get_model_names(),
             }
 

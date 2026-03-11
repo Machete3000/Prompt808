@@ -407,12 +407,28 @@ app.registerExtension({
   settings: [
     {
       id: "Prompt808. Prompt808",
-      name: "Version 1.0.0",
+      name: "v…",
       type: () => {
         const a = document.createElement("a");
         a.textContent = "www.prompt808.com";
         a.href = "https://www.prompt808.com";
         a.target = "_blank";
+
+        // Update the version label asynchronously
+        fetch("/prompt808/api/health")
+          .then((r) => r.json())
+          .then((d) => {
+            // Walk up from the link to find the setting row's label
+            const row = a.closest("[class*='setting']") || a.parentElement?.parentElement;
+            if (row) {
+              const label = row.querySelector("label") || row.querySelector("span");
+              if (label && label.textContent.includes("v…")) {
+                label.textContent = `v${d.version || "?"}`;
+              }
+            }
+          })
+          .catch(() => {});
+
         return a;
       },
     },
@@ -426,6 +442,25 @@ app.registerExtension({
         api.saveAppSettings({ nsfw: value }).then(() => notifyNodeRefresh()).catch(() => {
           toast("Failed to save NSFW setting — change may not persist after restart", "error");
           notifyNodeRefresh();
+        });
+      },
+    },
+    {
+      id: "Prompt808.General.BalanceLibraries",
+      name: "Balance Libraries",
+      type: "boolean",
+      defaultValue: true,
+      tooltip:
+        "Controls how elements are picked when generating from multiple libraries. " +
+        "ON (default): Each library contributes equally. A small 30-element library has the same influence as a 3,000-element library. " +
+        "This is usually what you want -- you selected both libraries because you " +
+        "want elements from both. " +
+        "OFF: All elements are thrown into one pool. Larger libraries naturally " +
+        "dominate and smaller ones may rarely appear. " +
+        "Has no effect when using a single library.",
+      onChange: (value) => {
+        api.saveAppSettings({ balance_libraries: value }).catch(() => {
+          toast("Failed to save Balance Libraries setting", "error");
         });
       },
     },
@@ -478,6 +513,8 @@ app.registerExtension({
       if (saved.nsfw !== undefined) app.ui.settings.setSettingValue("Prompt808.General.NSFW", saved.nsfw);
       if (saved.debug !== undefined) app.ui.settings.setSettingValue("Prompt808.Troubleshooting.Debug", saved.debug);
       if (saved.library_sort !== undefined) app.ui.settings.setSettingValue("Prompt808.General.LibrarySort", saved.library_sort);
+
+      if (saved.balance_libraries !== undefined) app.ui.settings.setSettingValue("Prompt808.General.BalanceLibraries", saved.balance_libraries);
     }).catch(() => {});
 
     // Try sidebar tab first (newer ComfyUI builds)

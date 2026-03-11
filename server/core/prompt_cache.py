@@ -17,7 +17,8 @@ log = logging.getLogger("prompt808.prompt_cache")
 
 
 def _make_key(seed, archetype_id, style, mood, model_name, quantization,
-              library_version, enrichment="Vivid", temperature=0.7):
+              library_version, enrichment="Vivid", temperature=0.7,
+              archetype_influence=0.7, balance_libraries=True):
     """Create a deterministic hash key from all generation inputs."""
     raw = json.dumps({
         "seed": seed,
@@ -29,15 +30,19 @@ def _make_key(seed, archetype_id, style, mood, model_name, quantization,
         "library_version": library_version,
         "enrichment": enrichment,
         "temperature": temperature,
+        "archetype_influence": archetype_influence,
+        "balance_libraries": balance_libraries,
     }, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def get(seed, archetype_id, style, mood, model_name, quantization, library_version,
-        enrichment="Vivid", temperature=0.7):
+        enrichment="Vivid", temperature=0.7,
+        archetype_influence=0.7, balance_libraries=True):
     """Look up a cached prompt. Returns (prompt, negative_prompt) or None."""
     key = _make_key(seed, archetype_id, style, mood, model_name, quantization,
-                    library_version, enrichment, temperature)
+                    library_version, enrichment, temperature,
+                    archetype_influence, balance_libraries)
     db = database.get_db()
     lib_id = library_manager.get_library_id()
 
@@ -52,10 +57,12 @@ def get(seed, archetype_id, style, mood, model_name, quantization, library_versi
 
 
 def put(seed, archetype_id, style, mood, model_name, quantization, library_version,
-        prompt, negative_prompt, enrichment="Vivid", temperature=0.7):
+        prompt, negative_prompt, enrichment="Vivid", temperature=0.7,
+        archetype_influence=0.7, balance_libraries=True):
     """Store a generated prompt in the cache."""
     key = _make_key(seed, archetype_id, style, mood, model_name, quantization,
-                    library_version, enrichment, temperature)
+                    library_version, enrichment, temperature,
+                    archetype_influence, balance_libraries)
     db = database.get_db()
     lib_id = library_manager.get_library_id()
     lock = database.write_lock()
@@ -72,13 +79,17 @@ def put(seed, archetype_id, style, mood, model_name, quantization, library_versi
 
 
 def invalidate():
-    """Clear the entire prompt cache (called when library changes)."""
+    """Clear the prompt cache for all libraries.
+
+    Clears globally rather than per-library because multi-library prompts
+    are cached under the first library's ID — an element edit in any
+    constituent library must invalidate those entries too.
+    """
     db = database.get_db()
-    lib_id = library_manager.get_library_id()
     lock = database.write_lock()
 
     with lock:
-        db.execute("DELETE FROM prompt_cache WHERE library_id=?", (lib_id,))
+        db.execute("DELETE FROM prompt_cache")
         db.commit()
     log.info("Prompt cache invalidated")
 

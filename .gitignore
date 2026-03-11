@@ -49,6 +49,7 @@ NUL
 tests/
 pytest.ini
 __main__.py
+make_library.py
 server/app.py
 
 # Frontend source (standalone dev tool, not part of the ComfyUI node)

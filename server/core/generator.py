@@ -21,7 +21,7 @@ import re
 from collections import Counter
 
 from . import prompt_cache
-from .coherence import check_color_harmony, filter_by_ids, filter_by_tags, pick
+from .coherence import check_color_harmony
 from .model_manager import ENRICHMENT_LEVELS
 
 log = logging.getLogger("prompt808.generator")
@@ -245,22 +245,31 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
                     model_name=None, quantization="FP16", enrichment="Vivid",
                     temperature=0.7, max_tokens=1024,
                     model_manager=None, element_store=None, archetype_store=None,
-                    style_profile_module=None, debug=False, nsfw=False):
+                    style_profile_module=None, debug=False, nsfw=False,
+                    archetype_influence=0.7, balance_libraries=True):
     """Generate a photography prompt from the element library.
 
     Args:
         seed: Random seed for deterministic element selection.
         archetype_id: Archetype to filter elements by, or "Any".
-        style: Style instruction key (Cinematic, Fine Art, Fashion, Documentary).
+        style: Style instruction key (e.g. Cinematic, Fine Art, Portrait, Native).
         mood: Mood modifier key, or "Any".
         model_name: LLM model name for composition.
         quantization: LLM quantization level.
         enrichment: Enrichment level for descriptions.
+        temperature: LLM sampling temperature.
+        max_tokens: Maximum tokens for LLM response.
         model_manager: The model_manager module (for LLM calls).
         element_store: The store.elements module.
         archetype_store: The store.archetypes module.
         style_profile_module: The core.style_profile module (optional).
         debug: Enable debug logging.
+        nsfw: Allow adult content styles (Boudoir, Erotica).
+        archetype_influence: 0.0–1.0 probability of picking archetype-favored
+            elements vs. random. Default 0.7.
+        balance_libraries: When True and multiple libraries are merged,
+            pick elements evenly across libraries instead of from the
+            combined pool.
 
     Returns:
         dict with keys:
@@ -322,7 +331,7 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
 
     cached = prompt_cache.get(
         seed, archetype_id, style, mood, model_name, quantization, library_version,
-        enrichment, temperature,
+        enrichment, temperature, archetype_influence, balance_libraries,
     )
     if cached:
         prompt_text, negative_text = cached
@@ -353,33 +362,22 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
 
     # Step 2: Filter elements by extraction type based on style
     if style == "Native":
-        # Prefer native elements; supplement with photo elements when
-        # the native pool is too thin (e.g., only 1 source photo analyzed
-        # as non-photography). Camera-category elements are always excluded
-        # since lens/f-stop specs don't apply to non-photography art.
-        native = [e for e in all_elements if e.get("extraction_type") == "native"]
+        # Native = "truthful to source medium".  Three inclusion rules:
+        #   1. extraction_type="native" — non-photo art's native description
+        #   2. is_photograph=True — photos' photo-pass IS their native desc
+        #   3. No extraction_type (NULL) — curated/universal elements that
+        #      are medium-agnostic (e.g. poses, moods from make_library.py)
+        # Camera-category elements are excluded since lens/f-stop specs
+        # don't apply when the pool may contain non-photography art.
+        native = [
+            e for e in all_elements
+            if e.get("extraction_type") == "native"
+            or e.get("is_photograph")
+            or not e.get("extraction_type")
+        ]
         if native:
-            native_sources = {
-                e.get("source_photo") or e.get("thumbnail") or "unknown"
-                for e in native
-            }
-            if len(native_sources) >= 2:
-                all_elements = native
-            else:
-                # Single source — supplement for variety
-                photo_supplement = [
-                    e for e in all_elements
-                    if e.get("extraction_type") != "native"
-                    and e.get("category") != "camera"
-                ]
-                all_elements = native + photo_supplement
-                log.info(
-                    "Native pool from %d source(s), supplementing with "
-                    "%d photo elements for variety",
-                    len(native_sources), len(photo_supplement),
-                )
+            all_elements = [e for e in native if e.get("category") != "camera"]
         else:
-            # No native elements — use all but exclude camera category
             all_elements = [
                 e for e in all_elements if e.get("category") != "camera"
             ]
@@ -391,21 +389,16 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
         if photo:
             all_elements = photo
 
-    # Step 3: Filter elements by archetype
-    selected_elements = all_elements
-
+    # Step 3: Identify archetype-favored elements (weighted, not filtered)
+    archetype_element_ids = set()
     if archetype:
-        selected_elements = _filter_elements_by_archetype(all_elements, archetype)
-        # Fall back to all elements if archetype filter is too restrictive
-        if len(selected_elements) < 3:
-            log.warning("Archetype '%s' matched only %d elements, using all",
-                        archetype_name, len(selected_elements))
-            selected_elements = all_elements
-            archetype_name = "None (fallback)"
+        archetype_element_ids = _get_archetype_element_ids(all_elements, archetype)
 
     # Step 4: Seeded random selection of elements per category
     rng = random.Random(seed)
-    chosen_elements = _select_elements(rng, selected_elements)
+    chosen_elements = _select_elements(rng, all_elements, archetype_element_ids,
+                                        archetype_influence=archetype_influence,
+                                        balance_libraries=balance_libraries)
 
     if not chosen_elements:
         return {
@@ -450,6 +443,7 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
     prompt_cache.put(
         seed, archetype_id, style, mood, model_name, quantization,
         library_version, prompt_text, negative_text, enrichment, temperature,
+        archetype_influence, balance_libraries,
     )
 
     return {
@@ -464,38 +458,57 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
     }
 
 
-def _filter_elements_by_archetype(elements, archetype):
-    """Filter elements using archetype's compatible tags and element_ids."""
+def _get_archetype_element_ids(elements, archetype):
+    """Return the set of element object identities favored by an archetype.
+
+    Uses Python ``id(elem)`` so that element-ID collisions across libraries
+    don't cause false matches.  Direct ``element_ids`` matching is scoped to
+    the archetype's own library; compatible-tag matching is cross-library.
+    Excludes elements matching negative hints.
+    """
     compatible = archetype.get("compatible", {})
-    element_ids = archetype.get("element_ids", [])
-    negative_hints = archetype.get("negative_hints", [])
+    element_ids = set(archetype.get("element_ids", []))
+    negative_hints = set(archetype.get("negative_hints", []))
+    arch_library = archetype.get("_library")
 
-    # First: include elements by ID (direct membership)
-    id_matches = filter_by_ids(elements, element_ids)
+    favored = set()
 
-    # Second: include elements by tag matching
-    tag_matches = []
     for elem in elements:
-        if elem in id_matches:
+        eid = elem.get("id")
+        if not eid:
             continue
+
+        # Exclude elements matching negative hints
+        if negative_hints and (set(elem.get("tags", [])) & negative_hints):
+            continue
+
+        # Direct membership — scoped to the archetype's own library
+        if element_ids and eid in element_ids:
+            elem_lib = elem.get("_library")
+            if not arch_library or not elem_lib or elem_lib == arch_library:
+                favored.add(id(elem))
+            continue
+
+        # Tag matching — cross-library, requires meaningful overlap.
+        # A single shared tag (e.g. "leading_lines") is too weak a signal
+        # when archetypes list 20+ tags per category.  Require at least 20%
+        # of the archetype's tags for that category to overlap, with a
+        # minimum of 2 matching tags.
         cat = elem.get("category", "")
         tag_key = f"{cat}_tags"
         if tag_key in compatible:
-            required = compatible[tag_key]
-            if filter_by_tags([elem], "tags", required):
-                tag_matches.append(elem)
+            arch_tags = set(compatible[tag_key])
+            elem_tags = set(elem.get("tags", []))
+            overlap = arch_tags & elem_tags
+            min_required = max(2, int(len(arch_tags) * 0.2)) if len(arch_tags) >= 5 else 1
+            if len(overlap) >= min_required:
+                favored.add(id(elem))
 
-    combined = id_matches + tag_matches
-
-    # Exclude elements matching negative hints
-    if negative_hints:
-        combined = [e for e in combined
-                    if not set(e.get("tags", [])) & set(negative_hints)]
-
-    return combined
+    return favored
 
 
-def _select_elements(rng, elements, max_retries=5):
+def _select_elements(rng, elements, archetype_element_ids=None, max_retries=5,
+                     archetype_influence=0.7, balance_libraries=True):
     """Select elements per category using seeded RNG with frequency weighting
     and color harmony validation.
 
@@ -503,6 +516,16 @@ def _select_elements(rng, elements, max_retries=5):
     mood) are always included. Tier 2 categories are included with probability
     proportional to their photo fraction — if only 3 out of 44 photos have
     tattoos, tattoo elements appear in ~7% of prompts, not 100%.
+
+    When archetype_element_ids is provided, per-category adaptive weighting
+    targets *archetype_influence* probability of picking an archetype-favored
+    element.  Categories where the archetype is very specific (few matches in
+    a large pool) get proportionally higher weights, while broadly-matching
+    categories get modest weights.
+
+    When balance_libraries is True, a two-stage selection is used: first pick
+    a library uniformly at random, then pick an element from that library.
+    This gives every library equal representation regardless of size.
 
     After selection, check_color_harmony validates that palette, lighting, and
     environment tags don't clash (e.g., neon cyberpunk + pastoral meadow).
@@ -521,20 +544,46 @@ def _select_elements(rng, elements, max_retries=5):
         all_photos.add(photo)
         cat_photos.setdefault(cat, set()).add(photo)
 
+    # Pre-group by category+library for balanced mode
+    if balance_libraries:
+        cat_by_lib = {}  # {category: {library: [elements]}}
+        for elem in elements:
+            cat = elem.get("category", "unknown")
+            lib = elem.get("_library", "default")
+            cat_by_lib.setdefault(cat, {}).setdefault(lib, []).append(elem)
+
     n_photos = max(len(all_photos), 1)
 
     for attempt in range(max_retries):
         chosen_dict = {}
 
+        # Pre-compute which categories have favored elements so their
+        # Tier 2 inclusion probability can be boosted by archetype influence.
+        if archetype_element_ids:
+            favored_cats = {
+                elem.get("category") for elem in elements
+                if id(elem) in archetype_element_ids
+            }
+        else:
+            favored_cats = set()
+
         for cat in sorted(by_category.keys()):
             if cat in TIER1:
-                picked = pick(rng, by_category[cat])
+                picked = _pick_element(rng, by_category[cat], archetype_element_ids,
+                                       archetype_influence, balance_libraries,
+                                       cat_by_lib.get(cat) if balance_libraries else None)
                 if picked:
                     chosen_dict[cat] = picked
             else:
                 weight = len(cat_photos.get(cat, set())) / n_photos
+                # Archetype influence acts as a floor for favored categories:
+                # pose at 3% photo fraction + 70% influence → 70% inclusion.
+                if cat in favored_cats:
+                    weight = max(weight, archetype_influence)
                 if rng.random() < weight:
-                    picked = pick(rng, by_category[cat])
+                    picked = _pick_element(rng, by_category[cat], archetype_element_ids,
+                                           archetype_influence, balance_libraries,
+                                           cat_by_lib.get(cat) if balance_libraries else None)
                     if picked:
                         chosen_dict[cat] = picked
 
@@ -548,6 +597,91 @@ def _select_elements(rng, elements, max_retries=5):
 
     log.warning("Could not resolve color harmony after %d attempts, proceeding anyway", max_retries)
     return list(chosen_dict.values())
+
+
+def _pick_element(rng, items, favored_ids, archetype_influence,
+                  balance_libraries, lib_groups):
+    """Pick an element with archetype weighting and optional library balancing.
+
+    Archetype influence decides first: with probability *archetype_influence*,
+    pick from the favored set.  For the remaining (1 - archetype_influence)
+    non-favored picks, Balance Libraries controls distribution — either pooled
+    (larger libraries dominate) or balanced (each library gets equal weight).
+    """
+    if not balance_libraries or not lib_groups:
+        return _weighted_pick(rng, items, favored_ids, archetype_influence)
+
+    # Archetype decides first
+    if favored_ids:
+        favored_items = [e for e in items if id(e) in favored_ids]
+        if favored_items and archetype_influence > 0:
+            # At full influence, always pick favored
+            if archetype_influence >= 1.0:
+                return rng.choice(favored_items)
+            # Roll for archetype vs pool
+            if rng.random() < archetype_influence:
+                return rng.choice(favored_items)
+        elif not favored_items and archetype_influence >= 1.0:
+            # No favored elements in this category — skip it
+            return None
+
+    # Non-favored pick: balance across libraries
+    lib_name = rng.choice(list(lib_groups.keys()))
+    lib_items = lib_groups[lib_name]
+    if not lib_items:
+        return rng.choice(items)
+    return rng.choice(lib_items)
+
+
+def _weighted_pick(rng, items, favored_ids, target_p):
+    """Pick a random item with adaptive weighting for favored elements.
+
+    *favored_ids* is a set of ``id(elem)`` object identities (not element-ID
+    strings) so that element-ID collisions across libraries don't cause false
+    matches.
+
+    Computes a per-category weight that targets *target_p* probability of
+    selecting an archetype-favored element.  This auto-scales: categories
+    where the archetype is very specific (few matches in a large pool) get
+    high weights, while broadly-matching categories get modest weights.
+
+    When favored_ids is None or empty, falls back to uniform random selection.
+    """
+    if not items:
+        return None
+    if not favored_ids:
+        return rng.choice(items)
+
+    n_favored = sum(1 for e in items if id(e) in favored_ids)
+    n_other = len(items) - n_favored
+
+    if n_favored == 0:
+        # No favored elements in this category — at full influence skip it
+        # entirely; otherwise pick uniformly
+        return None if target_p >= 1.0 else rng.choice(items)
+
+    if n_other == 0:
+        # All items are favored — uniform pick among them
+        return rng.choice(items)
+
+    # At target_p >= 1.0, pick exclusively from favored elements
+    if target_p >= 1.0:
+        favored_items = [e for e in items if id(e) in favored_ids]
+        return rng.choice(favored_items)
+
+    # Solve: n_favored * w / (n_favored * w + n_other) = target_p
+    #    w = target_p * n_other / (n_favored * (1 - target_p))
+    weight = target_p * n_other / (n_favored * (1 - target_p))
+    weight = max(1.0, weight)  # Never down-weight favored elements
+
+    weights = []
+    for elem in items:
+        if id(elem) in favored_ids:
+            weights.append(weight)
+        else:
+            weights.append(1.0)
+
+    return rng.choices(items, weights=weights, k=1)[0]
 
 
 def _llm_compose(chosen_elements, style, mood, archetype, seed,

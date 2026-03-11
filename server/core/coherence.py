@@ -1,61 +1,10 @@
-"""Coherence checking utilities for element selection and filtering.
+"""Coherence checking utilities for element selection.
 
-Category-agnostic functions for tag matching, random selection, and
-color harmony validation. Used for archetype-based element filtering
-with dynamic category keys.
+Color harmony validation used during element selection to prevent
+clashing combinations (e.g., neon cyberpunk palette + pastoral meadow).
 """
 
-import random
 import re
-
-# --- Tag Filtering ---
-
-
-def filter_by_tags(items, tag_key, required_tags, exclude_tags=None, match_all=False):
-    """Filter a list of dicts by tag matching.
-
-    If match_all is True, items must have ALL required_tags.
-    If match_all is False (default), items must have AT LEAST ONE required_tag.
-    Optionally exclude items that have any of the exclude_tags.
-    """
-    if not required_tags:
-        result = items
-    else:
-        if match_all:
-            result = [item for item in items
-                      if set(required_tags).issubset(set(item.get(tag_key, [])))]
-        else:
-            result = [item for item in items
-                      if bool(set(item.get(tag_key, [])) & set(required_tags))]
-    if exclude_tags:
-        result = [item for item in result
-                  if not bool(set(item.get(tag_key, [])) & set(exclude_tags))]
-    return result
-
-
-def filter_by_ids(items, required_ids):
-    """Filter items by their id being in required_ids list."""
-    if not required_ids:
-        return items
-    return [item for item in items if item["id"] in required_ids]
-
-
-def pick(rng, items, fallback_pool=None):
-    """Pick a random item from items, falling back to fallback_pool if empty.
-
-    Args:
-        rng: A random.Random instance (seeded for determinism).
-        items: Primary pool to pick from.
-        fallback_pool: Backup pool if items is empty.
-
-    Returns:
-        Selected item dict, or None if both pools are empty.
-    """
-    if items:
-        return rng.choice(items)
-    if fallback_pool:
-        return rng.choice(fallback_pool)
-    return None
 
 
 def has_tag_overlap(entry_tags, required_tags):

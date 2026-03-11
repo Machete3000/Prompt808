@@ -39,23 +39,34 @@ app.registerExtension({
       if (!libWidget) return;
       if (isConnected) {
         hideWidget(this, libWidget);
+        refreshArchetypes(this, "All");
       } else {
         showWidget(libWidget);
+        refreshArchetypes(this, libWidget.value);
       }
       this.setSize(this.computeSize());
       this.setDirtyCanvas(true, true);
     };
 
     // On configure (workflow load), sync library widget visibility to actual connection state
+    // and fix NaN widgets from workflows saved before archetype_influence was a node input.
     const origConfigure = nodeType.prototype.configure;
     nodeType.prototype.configure = function (info) {
       origConfigure?.apply(this, arguments);
+
+      // Fix NaN for archetype_influence added in a later version
+      const aiWidget = this.widgets?.find((w) => w.name === "archetype_influence");
+      if (aiWidget && (aiWidget.value == null || Number.isNaN(aiWidget.value))) {
+        aiWidget.value = 70;
+      }
+
       const libInput = this.inputs?.find((inp) => inp.name === "libraries");
       const libWidget = this.widgets?.find((w) => w.name === "library");
       if (!libWidget) return;
       const connected = libInput && libInput.link != null;
       if (connected) {
         hideWidget(this, libWidget);
+        refreshArchetypes(this, "All");
       } else {
         showWidget(libWidget);
       }
@@ -158,8 +169,15 @@ async function refreshDropdowns(node) {
   try {
     // Use /prompt808/api/ routes (registered on PromptServer)
     const libWidget = node.widgets?.find((w) => w.name === "library");
+    const libInput = node.inputs?.find((inp) => inp.name === "libraries");
+    const librariesConnected = libInput && libInput.link != null;
     const headers = {};
-    if (libWidget?.value) headers["X-Library"] = libWidget.value;
+    // Use "All" when Library Select node is connected or "All" is selected
+    if (librariesConnected) {
+      headers["X-Library"] = "All";
+    } else if (libWidget?.value) {
+      headers["X-Library"] = libWidget.value;
+    }
 
     // Fetch options and libraries in parallel
     const [optResp, libResp] = await Promise.all([

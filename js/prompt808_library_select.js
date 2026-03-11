@@ -16,6 +16,9 @@ const TOGGLE_WIDTH_RATIO = 1.5;
 /** Cached library names, refreshed on node creation and sidebar events. */
 let _libraryNames = [];
 
+/** Track live Select Libraries nodes for refresh events. */
+const _liveSelectNodes = new Set();
+
 async function fetchLibraryNames() {
   try {
     const resp = await fetch("/prompt808/api/libraries");
@@ -309,6 +312,7 @@ app.registerExtension({
       this._slotCounter = 0;
       this._buttonSpacer = null;
 
+      _liveSelectNodes.add(this);
       fetchLibraryNames();
 
       // Add 2 default slots, then static UI (button at bottom)
@@ -321,6 +325,13 @@ app.registerExtension({
       this.size[0] = Math.max(this.size[0], computed[0]);
       this.size[1] = Math.max(this.size[1], computed[1]);
       this.setDirtyCanvas(true, true);
+    };
+
+    // ---- onRemoved ----
+    const origOnRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      _liveSelectNodes.delete(this);
+      origOnRemoved?.apply(this, arguments);
     };
 
     // ---- configure (restore from saved workflow) ----
@@ -454,7 +465,18 @@ app.registerExtension({
   },
 });
 
-// Refresh library names when sidebar signals a change
-document.addEventListener("prompt808:options-changed", () => {
-  fetchLibraryNames();
+// Refresh library names and update live nodes when sidebar signals a change
+document.addEventListener("prompt808:options-changed", async () => {
+  await fetchLibraryNames();
+  for (const node of _liveSelectNodes) {
+    const slots = (node.widgets || []).filter(
+      (w) => w instanceof LibrarySlotWidget,
+    );
+    for (const slot of slots) {
+      if (slot._value.name && !_libraryNames.includes(slot._value.name)) {
+        slot._value = { ...slot._value, name: "" };
+      }
+    }
+    node.setDirtyCanvas(true, true);
+  }
 });
