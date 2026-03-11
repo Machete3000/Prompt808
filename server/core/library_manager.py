@@ -139,6 +139,8 @@ def list_libraries():
     for row in rows:
         lib_id = row["id"]
         name = row["name"]
+        if not name:
+            continue  # skip corrupted rows
 
         elem_count_row = db.execute(
             "SELECT COUNT(*) as cnt FROM elements WHERE library_id=?", (lib_id,)
@@ -146,10 +148,13 @@ def list_libraries():
         element_count = elem_count_row["cnt"] if elem_count_row else 0
 
         # Count thumbnails on disk
-        thumbs_dir = _LIBRARIES_DIR / name / "thumbnails"
         photo_count = 0
-        if thumbs_dir.is_dir():
-            photo_count = sum(1 for f in thumbs_dir.iterdir() if f.is_file())
+        try:
+            thumbs_dir = _LIBRARIES_DIR / name / "thumbnails"
+            if thumbs_dir.is_dir():
+                photo_count = sum(1 for f in thumbs_dir.iterdir() if f.is_file())
+        except OSError:
+            pass
 
         result.append({
             "name": name,

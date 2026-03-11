@@ -416,7 +416,7 @@ class Prompt808Generate:
         )
 
         status = result.get("status", "")
-        if status and status != "ok":
+        if status not in ("", "ok", "cache_hit"):
             raise RuntimeError(f"Generation failed ({status})")
 
         result["seed"] = seed
