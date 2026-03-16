@@ -232,7 +232,7 @@ function _renderDropzone() {
   } else {
     _dropzoneEl.appendChild($el("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" } }, [
       $el("p.p8-drop-label", { textContent: "Drop images here or click to browse" }),
-      $el("p.p8-drop-hint", { textContent: "JPG, PNG, WebP, BMP, TIFF, HEIC \u2014 multiple files supported" }),
+      $el("p.p8-drop-hint", { textContent: "JPG, PNG, WebP, AVIF, BMP, TIFF, HEIC \u2014 multiple files supported" }),
     ]));
   }
 }

@@ -181,6 +181,90 @@ def get_vision_model_names():
         return []
 
 
+def estimate_vision_model_vram(model_name, quantization="FP16"):
+    """Estimate VRAM (in GB) needed for a vision model.
+
+    Resolution order:
+    1. Registry lookup (models.json + custom_models.json vision_models)
+    2. HuggingFace cache — sum safetensors file sizes, scale by quantization
+    3. Hardcoded default (12GB)
+    """
+    # --- 1. Registry lookup ---
+    repo_id = None
+    for path in (MODELS_PATH, CUSTOM_MODELS_PATH):
+        try:
+            if not path.exists():
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            info = raw.get("vision_models", {}).get(model_name, {})
+            if info:
+                repo_id = info.get("repo_id")
+                vram = info.get("vram_requirement", {})
+                est = _pick_vram_for_quant(vram, quantization)
+                if est > 0:
+                    return est
+        except Exception:
+            continue
+
+    # --- 2. HuggingFace cache probe ---
+    try:
+        # If we have a repo_id from registry (but no vram_requirement), use it.
+        candidates = [repo_id] if repo_id else []
+
+        cache_info = _scan_hf_cache()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            for repo in cache_info.repos:
+                if repo.repo_id == candidate:
+                    st_bytes = sum(
+                        f.size_on_disk for rev in repo.revisions
+                        for f in rev.files
+                        if f.file_path.name.endswith(".safetensors")
+                    )
+                    if st_bytes > 0:
+                        disk_gb = st_bytes / (1024**3)
+                        est = _scale_disk_to_vram(disk_gb, quantization)
+                        log.debug("Estimated %.1fGB VRAM for %s from cache "
+                                  "(%.1fGB on disk, quant=%s)",
+                                  est, model_name, disk_gb, quantization)
+                        return est
+    except Exception:
+        pass
+
+    # --- 3. Hardcoded default ---
+    return 12.0
+
+
+def _scan_hf_cache():
+    """Scan the HuggingFace cache directory. Thin wrapper for testability."""
+    from huggingface_hub.utils import scan_cache_dir
+    return scan_cache_dir()
+
+
+def _pick_vram_for_quant(vram_dict, quantization):
+    """Pick the VRAM estimate matching the quantization level."""
+    if quantization == "4-bit":
+        return vram_dict.get("4bit", 0)
+    if quantization in ("8-bit", "FP8"):
+        return vram_dict.get("8bit", vram_dict.get("full", 0))
+    return vram_dict.get("full", 0)
+
+
+def _scale_disk_to_vram(disk_gb, quantization):
+    """Estimate VRAM from on-disk safetensors size.
+
+    Empirical ratios derived from models.json entries:
+      FP16: ~0.7x disk size  |  8-bit: ~0.4x  |  4-bit: ~0.25x
+    """
+    if quantization == "4-bit":
+        return disk_gb * 0.25
+    if quantization in ("8-bit", "FP8"):
+        return disk_gb * 0.4
+    return disk_gb * 0.7
+
+
 def _resolve_device(device_choice):
     """Resolve 'auto' to the best available device."""
     if device_choice != "auto":
@@ -303,20 +387,14 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
     unload_model()
 
     # Ask ComfyUI to free VRAM before loading our model.
-    # NOTE: sidebar callers (routes.py) should call unload_all_models()
-    # before invoking generation — free_memory() alone may not reclaim
-    # enough after a workflow run.  We still call free_memory() here as
-    # a safety net for the node path (where ComfyUI manages memory).
+    # Both sidebar callers (routes.py) and the node path use free_memory()
+    # to cooperatively reclaim only the VRAM needed, avoiding interference
+    # with concurrently running workflows.
     if device == "cuda":
         try:
             import comfy.model_management
             vram = info.get("vram_requirement", {})
-            if quantization == "4-bit":
-                est_gb = vram.get("4bit", 0)
-            elif quantization in ("8-bit", "FP8"):
-                est_gb = vram.get("8bit", 0)
-            else:
-                est_gb = vram.get("full", 0)
+            est_gb = _pick_vram_for_quant(vram, quantization)
             if est_gb > 0:
                 comfy.model_management.free_memory(
                     int(est_gb * 1024**3),

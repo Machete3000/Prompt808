@@ -214,7 +214,7 @@ if _HAS_PROMPT_SERVER:
     # Analysis
     # -----------------------------------------------------------------------
 
-    SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
+    from .api.analysis import SUPPORTED_FORMATS
 
     @routes.get("/prompt808/api/analyze/options")
     async def analyze_options(request):
@@ -277,14 +277,13 @@ if _HAS_PROMPT_SERVER:
 
         thumbnails_dir = library_manager.get_thumbnails_dir()
 
-        # Sidebar runs outside ComfyUI's workflow pipeline — aggressively
-        # free VRAM so analysis models can load after a workflow run.
+        # Ask ComfyUI to free VRAM for our analysis models.
         # IMPORTANT: Call synchronously on the event-loop thread — ComfyUI's
         # model patching internals are not thread-safe. Dispatching to a
         # thread pool (asyncio.to_thread) corrupts tensor state and causes
         # "Cannot set version_counter for inference tensor" on the next
         # workflow execution.
-        _unload_comfy_models()
+        _free_vram_for_analysis(vision_model, quantization)
 
         resp = web.StreamResponse(
             status=200, reason="OK",
@@ -880,22 +879,33 @@ async def _sse_write(resp, event, data):
     await resp.write(payload.encode())
 
 
-def _unload_comfy_models():
-    """Force-unload all ComfyUI-tracked models and clear CUDA cache.
+def _free_vram_for_analysis(vision_model="Qwen3-VL-8B-Instruct",
+                            quantization="FP8"):
+    """Ask ComfyUI to free enough VRAM for the analysis pipeline.
 
-    Call this from sidebar endpoints (analysis, generation) before loading
-    our own models.  Sidebar actions run outside ComfyUI's workflow pipeline,
-    so the normal free_memory(N) may not reclaim enough VRAM after a workflow
-    has loaded diffusion models.  ComfyUI will reload them on-demand when the
-    next workflow runs.
+    Uses ComfyUI's cooperative free_memory() to request only the VRAM
+    actually needed.  On high-VRAM systems this avoids interfering with
+    a concurrently running workflow; on low-VRAM systems ComfyUI will
+    surgically offload only the models necessary to make room.
+
+    Estimated VRAM need = vision model + CLIP (~0.4GB) + sentence-
+    transformer (~0.1GB) + headroom.
     """
     try:
         import comfy.model_management
-        comfy.model_management.unload_all_models()
-        comfy.model_management.soft_empty_cache()
-        log.debug("Unloaded all ComfyUI models (sidebar VRAM reclaim)")
     except ImportError:
-        pass
+        return
+
+    from .core.model_manager import estimate_vision_model_vram
+
+    vision_gb = estimate_vision_model_vram(vision_model, quantization)
+    # CLIP (~0.4GB) + sentence-transformer (~0.1GB) + 1GB headroom
+    total_gb = vision_gb + 1.5
+    comfy.model_management.free_memory(
+        int(total_gb * 1024**3),
+        comfy.model_management.get_torch_device(),
+    )
+    log.debug("Asked ComfyUI to free ~%.1fGB VRAM for analysis", total_gb)
 
 
 def _check_shutdown():

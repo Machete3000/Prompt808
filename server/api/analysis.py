@@ -41,7 +41,14 @@ except ImportError:
 log = logging.getLogger("prompt808.api.analysis")
 
 # Supported image formats
-SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
+SUPPORTED_FORMATS = {
+    ".jpg", ".jpeg", ".jfif", ".jpe",
+    ".png", ".webp", ".avif", ".avifs",
+    ".bmp", ".dib", ".tiff", ".tif",
+    ".heic", ".heif", ".gif",
+    ".jp2", ".j2k", ".j2c", ".jpf", ".jpx", ".jpc",
+    ".psd", ".tga", ".icb", ".vda", ".vst",
+}
 
 from ..core import library_manager
 
