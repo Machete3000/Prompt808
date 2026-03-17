@@ -224,11 +224,25 @@ class VisionModelManager:
         self.attention_mode = attention_mode
         self._model = None
         self._processor = None
+        self._load_error = None
 
     def _load(self):
         if self._model is not None:
             return
+        # If a previous load failed, raise immediately instead of
+        # re-hitting HuggingFace API on every retry/image.
+        if self._load_error is not None:
+            raise self._load_error
 
+        try:
+            self._load_inner()
+        except Exception as e:
+            # Cache the error so subsequent calls fail fast
+            if self._load_error is None:
+                self._load_error = e
+            raise
+
+    def _load_inner(self):
         import json
 
         import torch
@@ -310,7 +324,13 @@ class VisionModelManager:
         try:
             self._model = VLAutoModel.from_pretrained(repo_id, **load_kwargs).eval()
         except Exception as e:
-            if self.quantization == "FP8":
+            error_msg = str(e).lower()
+            # Flash attention failure — fall back to SDPA and retry
+            if "flash_attn" in error_msg or "flash attention" in error_msg:
+                log.warning("flash_attn failed (%s), falling back to SDPA", e)
+                load_kwargs["attn_implementation"] = "sdpa"
+                self._model = VLAutoModel.from_pretrained(repo_id, **load_kwargs).eval()
+            elif self.quantization == "FP8":
                 log.warning("FP8 loading failed for %s (%s), falling back to FP16",
                             self.model_name, e)
                 load_kwargs.pop("quantization_config", None)

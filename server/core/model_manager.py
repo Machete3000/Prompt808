@@ -300,6 +300,11 @@ def _flash_attn_available():
         major, _ = torch.cuda.get_device_capability()
         if major < 8:
             return False
+        # Verify package metadata exists — transformers checks this internally
+        # and throws PackageNotFoundError if missing, even when the module
+        # can be imported (broken/partial install).
+        import importlib.metadata
+        importlib.metadata.version("flash_attn")
         import flash_attn  # noqa: F401
         return True
     except Exception:
