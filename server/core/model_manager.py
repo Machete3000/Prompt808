@@ -100,6 +100,7 @@ _loaded_tokenizer = None
 _loaded_signature = None  # (repo_id, quantization, device, attn_impl, use_torch_compile)
 _loaded_is_bnb = False  # True if loaded with BnB — cannot CPU offload (NF4/int8 dtypes)
 _offloaded_to_ram = False  # True if model was CPU-offloaded and needs full reload
+_static_cache_supported = None  # None = not probed yet, True/False after first generate
 
 # Status tracking for error surfacing
 _last_status = "idle"  # "idle", "ok", "load_error: ...", "generation_error: ...", "parse_error: ..."
@@ -160,7 +161,7 @@ def get_model_names():
         name for name, info in registry.items()
         if fp8_ok or not info.get("quantized", False)
     ]
-    return ["None"] + sorted(names)
+    return ["None", "API"] + sorted(names)
 
 
 def get_vision_model_names():
@@ -485,7 +486,7 @@ def load_model(model_name, quantization="FP16", device="auto", attention_mode="a
 
 def unload_model():
     """Free model from memory and clear CUDA cache."""
-    global _loaded_model, _loaded_tokenizer, _loaded_signature, _loaded_is_bnb, _offloaded_to_ram
+    global _loaded_model, _loaded_tokenizer, _loaded_signature, _loaded_is_bnb, _offloaded_to_ram, _static_cache_supported
 
     had_model = _loaded_model is not None
 
@@ -500,6 +501,7 @@ def unload_model():
     _loaded_signature = None
     _loaded_is_bnb = False
     _offloaded_to_ram = False
+    _static_cache_supported = None
 
     gc.collect()
 
@@ -611,18 +613,42 @@ def generate_text(prompt, max_tokens=1024, temperature=0.9, seed=42, debug=False
     else:
         inputs = _loaded_tokenizer(prompt, return_tensors="pt").to(device)
 
+    generate_kwargs = dict(
+        **inputs,
+        max_new_tokens=max_tokens,
+        do_sample=True,
+        temperature=temperature,
+        top_p=0.9,
+        repetition_penalty=1.1,
+        eos_token_id=_loaded_tokenizer.eos_token_id,
+        pad_token_id=_loaded_tokenizer.eos_token_id,
+    )
+
+    # Static KV cache pre-allocates memory upfront, avoiding repeated
+    # dynamic allocation during autoregressive decoding.  Probed once
+    # per model load and cached in _static_cache_supported.
+    global _static_cache_supported
+    if _static_cache_supported is None:
+        try:
+            _loaded_model.generate(
+                torch.zeros((1, 1), dtype=torch.long, device=device),
+                max_new_tokens=1, cache_implementation="static",
+            )
+            _static_cache_supported = True
+            log.info("Static KV cache supported — enabled")
+        except (TypeError, ValueError, RuntimeError):
+            _static_cache_supported = False
+            log.info("Static KV cache not supported — using dynamic cache")
+    if _static_cache_supported:
+        generate_kwargs["cache_implementation"] = "static"
+
+    # torch.inference_mode is faster than no_grad (skips version counter
+    # and view tracking) but requires PyTorch >= 1.9.  Fall back safely.
+    _ctx = getattr(torch, "inference_mode", torch.no_grad)
+
     t0 = time.perf_counter()
-    with torch.no_grad():
-        outputs = _loaded_model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=0.9,
-            repetition_penalty=1.1,
-            eos_token_id=_loaded_tokenizer.eos_token_id,
-            pad_token_id=_loaded_tokenizer.eos_token_id,
-        )
+    with _ctx():
+        outputs = _loaded_model.generate(**generate_kwargs)
     elapsed = time.perf_counter() - t0
 
     new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
@@ -642,3 +668,66 @@ def generate_text(prompt, max_tokens=1024, temperature=0.9, seed=42, debug=False
         log.info("LLM DEBUG raw (with special tokens):\n%s", raw_with_special)
 
     return decoded
+
+
+# ── OpenAI-compatible API backend ────────────────────────────────────────
+
+
+def generate_text_api(prompt, api_url, max_tokens=1024, temperature=0.9,
+                      seed=42, debug=False):
+    """Generate text via an OpenAI-compatible API (LM Studio, Ollama, etc.).
+
+    Sends a chat completion request to the specified endpoint.  The model
+    selection is left to the server (uses whatever model is loaded).
+    """
+    import urllib.request
+    import urllib.error
+
+    endpoint = api_url.rstrip("/") + "/v1/chat/completions"
+
+    payload = json.dumps({
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "top_p": 0.9,
+        "max_tokens": max_tokens,
+        "seed": seed,
+        "stream": False,
+    }).encode("utf-8")
+
+    log.info("Generating text via API (%s)...", api_url)
+    t0 = time.perf_counter()
+
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"API request failed: {e}") from e
+
+    elapsed = time.perf_counter() - t0
+
+    content = result["choices"][0]["message"]["content"].strip()
+
+    # Strip residual thinking tags some models emit
+    content = re.sub(r"<\|?think(?:ing)?\|?>.*?<\|?/think(?:ing)?\|?>",
+                     "", content, flags=re.DOTALL).strip()
+
+    usage = result.get("usage", {})
+    out_tokens = usage.get("completion_tokens", len(content.split()))
+    tok_s = out_tokens / elapsed if elapsed > 0 else 0
+    log.info("API generated ~%d tokens in %.1fs (%.1f tok/s)",
+             out_tokens, elapsed, tok_s)
+
+    if debug:
+        log.info("API DEBUG seed=%d | elapsed=%.2fs | tok/s=%.1f",
+                 seed, elapsed, tok_s)
+        log.info("API DEBUG output:\n%s", content)
+
+    return content

@@ -132,7 +132,9 @@ class Prompt808Generate:
                 }),
                 "llm_model": (model_list, {
                     "default": model_list[0],
-                    "tooltip": "LLM model for prompt composition (None = simple mode)",
+                    "tooltip": "LLM model for prompt composition. "
+                               "None = simple mode (no LLM). "
+                               "API = use an OpenAI-compatible server (LM Studio, Ollama, etc.) at the api_url below.",
                 }),
                 "enrichment": (ENRICHMENTS, {
                     "default": "Any",
@@ -155,6 +157,12 @@ class Prompt808Generate:
                     "max": 2048,
                     "step": 64,
                     "tooltip": "Maximum tokens for LLM generation",
+                }),
+                "api_url": ("STRING", {
+                    "default": "http://127.0.0.1:1234",
+                    "tooltip": "Server URL for API mode (used when llm_model is set to API). "
+                               "Works with LM Studio, Ollama, or any OpenAI-compatible endpoint. "
+                               "Ignored when using a local HF model.",
                 }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": False,
@@ -189,7 +197,7 @@ class Prompt808Generate:
                  prompt_type="Any", archetype="Any", archetype_influence=70,
                  mood="Any", llm_model="None", enrichment="Any",
                  quantization="FP16", temperature=0.7, max_tokens=1024,
-                 keep_model_loaded=False, prefix="", suffix=""):
+                 api_url="", keep_model_loaded=False, prefix="", suffix=""):
         """Generate a prompt using node inputs."""
         try:
             from .server.core import library_manager
@@ -238,6 +246,7 @@ class Prompt808Generate:
                 quantization=quantization,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                api_url=api_url,
                 keep_model_loaded=keep_model_loaded,
                 prefix=prefix,
                 suffix=suffix,
@@ -245,7 +254,12 @@ class Prompt808Generate:
             )
 
             # Build status line
-            model_display = llm_model if llm_model and llm_model != "None" else "None"
+            if llm_model == "API":
+                model_display = f"API ({api_url.strip()})" if api_url else "API"
+            elif llm_model and llm_model != "None":
+                model_display = llm_model
+            else:
+                model_display = "None"
 
             # Archetype display: "library: archetype" format
             arch_name = result.get("archetype_used", "unknown")
@@ -323,7 +337,7 @@ class Prompt808Generate:
 
     def _generate_native(self, seed, prompt_type, archetype, archetype_influence,
                          mood, llm_model, enrichment, quantization, temperature,
-                         max_tokens, keep_model_loaded, prefix, suffix,
+                         max_tokens, api_url, keep_model_loaded, prefix, suffix,
                          multi_libraries=None):
         """Direct Python call into the generation pipeline."""
         try:
@@ -395,6 +409,9 @@ class Prompt808Generate:
             else:
                 archetype = "None"
 
+        # API mode: only active when llm_model is explicitly set to "API"
+        effective_api_url = api_url.strip() if llm_model == "API" and api_url else None
+
         result = generator.generate_prompt(
             seed=seed,
             archetype_id=archetype,
@@ -413,6 +430,7 @@ class Prompt808Generate:
             nsfw=nsfw,
             archetype_influence=archetype_influence,
             balance_libraries=balance_libraries,
+            api_url=effective_api_url,
         )
 
         status = result.get("status", "")
@@ -439,8 +457,8 @@ class Prompt808Generate:
                 parts.append(suffix.strip())
             result["prompt"] = " ".join(parts)
 
-        # Post-generation model lifecycle
-        if llm_model and llm_model != "None":
+        # Post-generation model lifecycle (only for local HF models, not API)
+        if llm_model not in (None, "None", "API"):
             if not keep_model_loaded:
                 model_manager.unload_model()
             else:

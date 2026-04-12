@@ -169,18 +169,19 @@ STYLE_CATEGORY_ORDER = {
     ],
 }
 
-# Short bridging phrases between element descriptions (cycled)
+# Short bridging phrases between element descriptions (cycled).
+# Spatial/relational connectors encourage scene composition over fragment lists.
 STYLE_CONNECTORS = {
-    "Architectural": [", intersected by ", ", anchored in ", ", defined by "],
-    "Boudoir": [", draped in ", ", revealing ", ", bathed in "],
-    "Cinematic": [", captured with ", ", revealing ", ", framed by "],
-    "Documentary": [", amid ", ", witnessing ", ", set against "],
-    "Erotica": [", exposing ", ", positioned in ", ", against "],
-    "Fashion": [", styled with ", ", against ", ", accentuated by "],
-    "Fine Art": [", dissolving into ", ", rendered in ", ", bathed in "],
-    "Native": [", with ", ", featuring ", ", rendered with "],
-    "Portrait": [", illuminated by ", ", revealing ", ", softened by "],
-    "Street": [", caught amid ", ", layered against ", ", framed within "],
+    "Architectural": [", framed against ", ", where ", ", revealing "],
+    "Boudoir": [", set against ", ", where ", ", as "],
+    "Cinematic": [", set within ", ", where ", ", as "],
+    "Documentary": [", amid ", ", where ", ", as "],
+    "Erotica": [", set against ", ", where ", ", as "],
+    "Fashion": [", against ", ", where ", ", styled with "],
+    "Fine Art": [", set within ", ", where ", ", as "],
+    "Native": [", set within ", ", featuring ", ", where "],
+    "Portrait": [", set against ", ", where ", ", as "],
+    "Street": [", caught amid ", ", where ", ", against "],
 }
 
 # (prefix, suffix) tuples applied to element descriptions by category
@@ -228,16 +229,16 @@ STYLE_CATEGORY_BOOSTERS = {
 
 # Closing quality descriptors per style
 STYLE_QUALITY_SUFFIXES = {
-    "Architectural": "tilt-shift precision, clean lines, structural clarity",
-    "Boudoir": "skin detail, intimate atmosphere, sensual lighting, shallow depth of field",
-    "Cinematic": "cinematic depth of field, anamorphic lens quality, film grain",
-    "Documentary": "raw authenticity, decisive moment, natural imperfection",
-    "Erotica": "anatomical precision, explicit detail, professional lighting, sharp focus on subject",
-    "Fashion": "editorial finish, magazine-quality",
-    "Fine Art": "gallery-quality print, contemplative mood, fine detail",
+    "Architectural": "shot on Phase One XT with 23mm lens, tilt-shift precision, clean lines",
+    "Boudoir": "shot on Canon EOS R5 with 85mm f/1.2 lens, shallow depth of field, skin detail",
+    "Cinematic": "shot on ARRI Alexa with Cooke anamorphic lens, cinematic depth of field, film grain",
+    "Documentary": "shot on Leica Q3 with 28mm lens, natural light, raw authenticity",
+    "Erotica": "shot on Sony A7IV with 50mm f/1.4 lens, sharp focus, professional lighting",
+    "Fashion": "shot on Hasselblad X2D with 80mm lens, editorial finish, magazine-quality",
+    "Fine Art": "shot on Fujifilm GFX 100S with 110mm lens, gallery-quality print, fine detail",
     "Native": "highly detailed, professional quality",
-    "Portrait": "shallow depth of field, skin detail, catchlight in eyes",
-    "Street": "decisive moment, urban texture, candid authenticity",
+    "Portrait": "shot on Nikon Z8 with 105mm f/1.4 lens, shallow depth of field, skin detail, catchlight in eyes",
+    "Street": "shot on Ricoh GR IIIx with 40mm lens, decisive moment, urban texture",
 }
 
 
@@ -246,7 +247,8 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
                     temperature=0.7, max_tokens=1024,
                     model_manager=None, element_store=None, archetype_store=None,
                     style_profile_module=None, debug=False, nsfw=False,
-                    archetype_influence=0.7, balance_libraries=True):
+                    archetype_influence=0.7, balance_libraries=True,
+                    api_url=None):
     """Generate a photography prompt from the element library.
 
     Args:
@@ -270,6 +272,8 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
         balance_libraries: When True and multiple libraries are merged,
             pick elements evenly across libraries instead of from the
             combined pool.
+        api_url: OpenAI-compatible API URL (e.g. LM Studio). When set,
+            uses the API for LLM composition instead of local HF inference.
 
     Returns:
         dict with keys:
@@ -422,13 +426,14 @@ def generate_prompt(seed, archetype_id="Any", style="Any", mood="Any",
             resolved_medium = "illustration"
 
     # Step 5: Build the prompt
-    if model_manager and model_name and model_name != "None":
-        # LLM-driven composition
+    use_llm = (model_manager and model_name and model_name != "None") or api_url
+    if use_llm:
+        # LLM-driven composition (local HF or remote API)
         prompt_text, negative_text = _llm_compose(
             chosen_elements, style, mood, archetype, seed,
             model_manager, model_name, quantization, enrichment,
             style_profile_module, debug, temperature, max_tokens,
-            resolved_medium=resolved_medium,
+            resolved_medium=resolved_medium, api_url=api_url,
         )
     else:
         # Fallback: simple concatenation (no LLM available)
@@ -684,10 +689,38 @@ def _weighted_pick(rng, items, favored_ids, target_p):
     return rng.choices(items, weights=weights, k=1)[0]
 
 
+def _deduplicate_elements(elements):
+    """Remove elements whose descriptions substantially overlap another's.
+
+    When multiple elements describe the same concept (e.g., "sprout emerging
+    from crack" in both environment and prop categories), keeps the longer,
+    more detailed description and drops the shorter duplicate.
+    """
+    descs = [(i, e.get("desc", "").lower()) for i, e in enumerate(elements)]
+    to_remove = set()
+    for i, d1 in descs:
+        if i in to_remove or not d1:
+            continue
+        words1 = set(d1.split())
+        if len(words1) < 3:
+            continue
+        for j, d2 in descs:
+            if j <= i or j in to_remove or not d2:
+                continue
+            words2 = set(d2.split())
+            if len(words2) < 3:
+                continue
+            overlap = len(words1 & words2)
+            if overlap > 0.6 * min(len(words1), len(words2)):
+                shorter = i if len(d1) < len(d2) else j
+                to_remove.add(shorter)
+    return [e for i, e in enumerate(elements) if i not in to_remove]
+
+
 def _llm_compose(chosen_elements, style, mood, archetype, seed,
                  model_manager, model_name, quantization, enrichment,
                  style_profile_module, debug, temperature=0.7, max_tokens=1024,
-                 resolved_medium=None):
+                 resolved_medium=None, api_url=None):
     """Use LLM to compose a natural-language prompt from elements.
 
     The composition prompt adapts based on the enrichment level — higher
@@ -695,6 +728,9 @@ def _llm_compose(chosen_elements, style, mood, archetype, seed,
     """
     # Look up enrichment config
     enrich_cfg = ENRICHMENT_LEVELS.get(enrichment, ENRICHMENT_LEVELS["Vivid"])
+
+    # Deduplicate elements with overlapping descriptions
+    chosen_elements = _deduplicate_elements(chosen_elements)
 
     # Build element descriptions for the LLM
     element_lines = []
@@ -749,16 +785,19 @@ def _llm_compose(chosen_elements, style, mood, archetype, seed,
                 break
 
     # Build rules block
-    word_range = enrich_cfg.get("word_range", "5-20 words")
     fidelity_rule = enrich_cfg.get("fidelity_rule", "")
     creative_rules = enrich_cfg.get("creative_rules", [])
 
     rules_lines = [
-        "- Output ONE continuous prompt paragraph (no line breaks)",
-        "- Weave all elements into a coherent scene description",
+        "- Natural language sentences, not comma-separated tags or fragments",
+        "- Each element appears ONCE — no redundancy or repetition",
+        "- Spatial terms required: describe where things are relative to each other (foreground, background, left, right, above, between)",
+        "- Lighting must interact with surfaces: describe where highlights land and how shadows fall on specific surfaces, not just the light source",
+        "- Specific over generic: 'cracked, parched earth' not 'ground'; 'warm amber tungsten' not 'warm light'",
         f"- Fidelity: {fidelity_rule}",
-        f"- {word_range} per element, 40-120 words total",
+        "- 80-200 words total",
         "- Reproduce all element descriptions faithfully — do not euphemize, censor, or omit anatomical, sexual, or explicit content",
+        "- Do not introduce elements, objects, or characters not present in the input list",
     ]
     for rule in creative_rules:
         rules_lines.append(f"- {rule}")
@@ -769,11 +808,31 @@ def _llm_compose(chosen_elements, style, mood, archetype, seed,
     composition_prompt = (
         f"{style_instruction}\n\n"
         f"{task_instruction}\n\n"
-        f"Elements:\n"
+        f"Compose a single flowing paragraph. Subject first — image models "
+        f"weight earlier tokens more heavily.\n\n"
+        f"Structure your paragraph in this order:\n"
+        f"1. SUBJECT — open with the subject, their physical details, and a "
+        f"physical action or pose connecting them to the scene\n"
+        f"2. ENVIRONMENT — where this is happening, with spatial relationships "
+        f"between elements (foreground, background, distances)\n"
+        f"3. LIGHTING — how light falls on the subject and environment surfaces "
+        f"(not just the source, but where highlights land and shadows form)\n"
+        f"4. PALETTE — the dominant color relationships in one phrase\n"
+        f"5. TECHNICAL — specific camera body, lens, focal length, depth of field\n"
+        f"6. MOOD — close with atmosphere and emotional tone\n\n"
+        f"Elements to incorporate (compose into a unified scene, NOT a list):\n"
         f"{elements_block}"
         f"{mood_clause}"
         f"{scene_context}"
         f"{style_context}\n\n"
+        f'Example of BAD output (fragment concatenation):\n'
+        f'"photography, mysterious atmosphere, sapling emerging from crack, '
+        f'softened by high-contrast sunlight, illuminated by wide-angle lens"\n\n'
+        f'Example of GOOD output (scene composition):\n'
+        f'"A woman leans toward a small green sapling emerging from cracked, '
+        f'parched earth, her face caught in the sharp shadows cast by overhead '
+        f'chain links as dense fog rolls in from the horizon behind her, shot on '
+        f'a Leica M11 with a 35mm f/1.4 Summilux lens"\n\n'
         f"Rules:\n"
         f"{rules_block}\n\n"
         f"Also provide a negative prompt (comma-separated terms to avoid).\n\n"
@@ -786,16 +845,26 @@ def _llm_compose(chosen_elements, style, mood, archetype, seed,
     effective_temp = min(max(effective_temp, 0.1), 1.5)
 
     try:
-        # Load model if needed
-        model_manager.load_model(model_name, quantization=quantization)
-
-        raw = model_manager.generate_text(
-            composition_prompt,
-            max_tokens=max_tokens,
-            temperature=effective_temp,
-            seed=seed,
-            debug=debug,
-        )
+        if api_url:
+            # Remote API backend (LM Studio, Ollama, etc.)
+            raw = model_manager.generate_text_api(
+                composition_prompt,
+                api_url=api_url,
+                max_tokens=max_tokens,
+                temperature=effective_temp,
+                seed=seed,
+                debug=debug,
+            )
+        else:
+            # Local HuggingFace model
+            model_manager.load_model(model_name, quantization=quantization)
+            raw = model_manager.generate_text(
+                composition_prompt,
+                max_tokens=max_tokens,
+                temperature=effective_temp,
+                seed=seed,
+                debug=debug,
+            )
 
         # Parse the LLM response
         from .json_parser import parse_llm_json
