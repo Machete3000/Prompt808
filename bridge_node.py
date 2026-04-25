@@ -133,8 +133,12 @@ class Prompt808Generate:
                 "llm_model": (model_list, {
                     "default": model_list[0],
                     "tooltip": "LLM model for prompt composition. "
+                               "API (recommended) = OpenAI-compatible server "
+                               "(LM Studio, Ollama, llama.cpp, vLLM) at the api_url below — "
+                               "typically 10-20x faster than the local HF path on the same GPU. "
                                "None = simple mode (no LLM). "
-                               "API = use an OpenAI-compatible server (LM Studio, Ollama, etc.) at the api_url below.",
+                               "The other entries are local HF models — useful for self-contained "
+                               "installs but slower than a llama.cpp/GGUF backend.",
                 }),
                 "enrichment": (ENRICHMENTS, {
                     "default": "Any",
@@ -161,8 +165,9 @@ class Prompt808Generate:
                 "api_url": ("STRING", {
                     "default": "http://127.0.0.1:1234",
                     "tooltip": "Server URL for API mode (used when llm_model is set to API). "
-                               "Works with LM Studio, Ollama, or any OpenAI-compatible endpoint. "
-                               "Ignored when using a local HF model.",
+                               "Works with LM Studio, Ollama, llama.cpp, vLLM, or any "
+                               "OpenAI-compatible endpoint. Default points to LM Studio's "
+                               "local server. Ignored when using a local HF model.",
                 }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": False,

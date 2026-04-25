@@ -79,6 +79,7 @@ async def analyze_photo(
     device: str = Form("auto"),
     attention_mode: str = Form("auto"),
     max_tokens: int = Form(2048),
+    api_url: str = Form(""),
     force: bool = Form(False),
 ):
     """Analyze a photo and extract photographic elements.
@@ -131,7 +132,10 @@ async def analyze_photo(
 
         analysis_result = analyzer.analyze_photo(
             image_path=tmp_path,
-            vision_model_manager=_get_vision_manager(vision_model, quantization, device, attention_mode),
+            vision_model_manager=_get_vision_manager(
+                vision_model, quantization, device, attention_mode,
+                api_url=api_url,
+            ),
             quantization=quantization,
             device=device,
             attention_mode=attention_mode,
@@ -423,14 +427,59 @@ class VisionModelManager:
                 pass
 
 
+class VisionApiClient:
+    """Adapter that exposes the VisionModelManager interface via an
+    OpenAI-compatible vision endpoint.
+
+    Implements ``generate_with_image`` so it can be passed wherever a
+    VisionModelManager is expected.  No local model is loaded: every
+    call hits the remote API.
+    """
+
+    def __init__(self, api_url):
+        self.api_url = api_url
+        self.model_name = "API"
+        self.requested_quantization = None
+        self.quantization = None
+        self.device = None
+        self.attention_mode = None
+
+    def generate_with_image(self, image_path, prompt, max_tokens=2048,
+                            temperature=0.3, seed=42):
+        from ..core import model_manager
+        return model_manager.generate_vision_api(
+            image_path, prompt, self.api_url,
+            max_tokens=max_tokens, temperature=temperature, seed=seed,
+        )
+
+    def unload(self):
+        # Nothing to unload — inference is remote.
+        return
+
+
 # Module-level vision model manager singleton
 _vision_manager = None
 _vision_lock = threading.Lock()
 
 
-def _get_vision_manager(model_name, quantization, device, attention_mode):
+def _get_vision_manager(model_name, quantization, device, attention_mode,
+                        api_url=None):
     global _vision_manager
     with _vision_lock:
+        if model_name == "API":
+            url = (api_url or "").strip()
+            if not url:
+                raise ValueError(
+                    "api_url is required when vision_model='API'"
+                )
+            if (_vision_manager is None
+                    or getattr(_vision_manager, "model_name", None) != "API"
+                    or getattr(_vision_manager, "api_url", None) != url):
+                if _vision_manager is not None:
+                    _vision_manager.unload()
+                _vision_manager = VisionApiClient(url)
+            return _vision_manager
+
         if (_vision_manager is None
                 or _vision_manager.model_name != model_name
                 or _vision_manager.requested_quantization != quantization

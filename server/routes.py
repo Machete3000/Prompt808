@@ -238,6 +238,7 @@ if _HAS_PROMPT_SERVER:
         device = "auto"
         attention_mode = "auto"
         max_tokens = 2048
+        api_url = ""
         force = False
 
         while True:
@@ -265,8 +266,16 @@ if _HAS_PROMPT_SERVER:
                         return web.Response(status=400, text="max_tokens must be an integer")
                     if not (256 <= max_tokens <= 4096):
                         return web.Response(status=400, text="max_tokens must be between 256 and 4096")
+                elif name == "api_url":
+                    api_url = val.strip()
                 elif name == "force":
                     force = val.lower() in ("true", "1", "yes")
+
+        if vision_model == "API" and not api_url:
+            return web.Response(
+                status=400,
+                text="api_url is required when vision_model='API'",
+            )
 
         if image_data is None:
             return web.Response(status=400, text="No image uploaded")
@@ -283,7 +292,9 @@ if _HAS_PROMPT_SERVER:
         # thread pool (asyncio.to_thread) corrupts tensor state and causes
         # "Cannot set version_counter for inference tensor" on the next
         # workflow execution.
-        _free_vram_for_analysis(vision_model, quantization)
+        # Skip when using a remote vision API — no local model to make room for.
+        if vision_model != "API":
+            _free_vram_for_analysis(vision_model, quantization)
 
         resp = web.StreamResponse(
             status=200, reason="OK",
@@ -305,7 +316,7 @@ if _HAS_PROMPT_SERVER:
             task = asyncio.create_task(asyncio.to_thread(
                 _run_analysis, image_data, image_filename, suffix,
                 thumbnails_dir, vision_model, quantization, device,
-                attention_mode, max_tokens, force, progress_cb,
+                attention_mode, max_tokens, api_url, force, progress_cb,
             ))
 
             while not task.done():
@@ -916,7 +927,7 @@ def _check_shutdown():
 
 def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
                   vision_model, quantization, device, attention_mode,
-                  max_tokens, force, progress_cb=None):
+                  max_tokens, api_url, force, progress_cb=None):
     """Run the full analysis pipeline (in thread pool)."""
     _progress = progress_cb or (lambda msg: None)
     tmp_path = None
@@ -958,7 +969,10 @@ def _run_analysis(image_data, image_filename, suffix, thumbnails_dir,
 
         analysis_result = analyzer.analyze_photo(
             image_path=tmp_path,
-            vision_model_manager=_get_vision_manager(vision_model, quantization, device, attention_mode),
+            vision_model_manager=_get_vision_manager(
+                vision_model, quantization, device, attention_mode,
+                api_url=api_url,
+            ),
             quantization=quantization,
             device=device,
             attention_mode=attention_mode,

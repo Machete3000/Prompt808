@@ -23,6 +23,7 @@ let _showSettings = false;
 let _visionModel = localStorage.getItem("sf_visionModel") || "Qwen3-VL-8B-Instruct-FP8";
 let _quantization = localStorage.getItem("sf_quantization") || "FP8";
 let _maxTokens = Number(localStorage.getItem("sf_maxTokens")) || 2048;
+let _apiUrl = localStorage.getItem("sf_visionApiUrl") || "http://127.0.0.1:1234";
 let _force = false;
 let _options = null;
 
@@ -48,7 +49,7 @@ export function render(container) {
       helpButton("Analyze", [
         "Drop, paste, or browse for images to extract visual elements. Each photo is sent to a local vision model that identifies subjects, lighting, color palette, composition, mood, textures, and more.",
         "Extracted elements are automatically categorized and added to your element library. Duplicate detection prevents the same element from being added twice — use the \"Skip duplicate check\" option to force re-analysis.",
-        "Vision Model Settings lets you choose which model analyzes your photos and at what precision. Larger models extract richer detail but need more VRAM. Quantization (FP8, 8-bit, 4-bit) reduces VRAM usage at the cost of some quality.",
+        "Vision Model Settings lets you choose how photos are analyzed. \"API\" (recommended) routes inference through an OpenAI-compatible server like LM Studio, Ollama, llama.cpp, or vLLM — typically 10-20x faster than the local path on the same GPU. The other entries load a Qwen-VL model locally via HuggingFace transformers; useful for self-contained installs but slower. Quantization (FP8, 8-bit, 4-bit) only applies to the local path and reduces VRAM at some quality cost.",
         "You can queue multiple images at once — they are processed sequentially with a progress bar and live status updates showing the current analysis phase. The image being processed is highlighted with a spinner overlay. Results appear in the Analysis Results section below as each image completes.",
       ], { marginLeft: "auto" }),
     ]),
@@ -262,19 +263,38 @@ function _renderSettings() {
     const models = _options?.vision_models || ["Qwen3-VL-8B-Instruct-FP8"];
     const quants = _options?.quantizations || ["FP16", "FP8", "8-bit", "4-bit"];
 
+    const isApi = _visionModel === "API";
+
     _settingsEl.appendChild($el("div.p8-settings-panel", {}, [
       $el("div.p8-field", {}, [
         $el("label.p8-label", { textContent: "Vision Model" }),
         $el("select.p8-select", {
-          onChange: (e) => { _visionModel = e.target.value; localStorage.setItem("sf_visionModel", _visionModel); },
+          onChange: (e) => {
+            _visionModel = e.target.value;
+            localStorage.setItem("sf_visionModel", _visionModel);
+            _renderSettings();
+          },
         }, models.map(m => $el("option", { value: m, textContent: m, selected: m === _visionModel }))),
       ]),
-      $el("div.p8-field", {}, [
-        $el("label.p8-label", { textContent: "Quantization" }),
-        $el("select.p8-select", {
-          onChange: (e) => { _quantization = e.target.value; localStorage.setItem("sf_quantization", _quantization); },
-        }, quants.map(q => $el("option", { value: q, textContent: q, selected: q === _quantization }))),
-      ]),
+      isApi
+        ? $el("div.p8-field", { style: { gridColumn: "1 / -1" } }, [
+            $el("label.p8-label", { textContent: "API URL" }),
+            $el("input.p8-input", {
+              type: "text", value: _apiUrl,
+              placeholder: "http://127.0.0.1:1234",
+              onInput: (e) => {
+                _apiUrl = e.target.value;
+                localStorage.setItem("sf_visionApiUrl", _apiUrl);
+              },
+              title: "OpenAI-compatible vision endpoint (LM Studio, Ollama, llama.cpp, vLLM, etc.)",
+            }),
+          ])
+        : $el("div.p8-field", {}, [
+            $el("label.p8-label", { textContent: "Quantization" }),
+            $el("select.p8-select", {
+              onChange: (e) => { _quantization = e.target.value; localStorage.setItem("sf_quantization", _quantization); },
+            }, quants.map(q => $el("option", { value: q, textContent: q, selected: q === _quantization }))),
+          ]),
       $el("div.p8-field", {}, [
         $el("label.p8-label", { textContent: "Max Tokens" }),
         $el("input.p8-input", {
@@ -428,6 +448,7 @@ async function _handleAnalyze() {
       formData.append("vision_model", _visionModel);
       formData.append("quantization", _quantization);
       formData.append("max_tokens", String(_maxTokens));
+      if (_visionModel === "API") formData.append("api_url", _apiUrl);
       if (_force) formData.append("force", "true");
 
       const result = await api.analyzePhoto(formData, (msg) => _renderPhase(msg));

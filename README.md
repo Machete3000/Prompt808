@@ -101,7 +101,12 @@ Changes take effect immediately — no restart required.
 
 ## Models
 
-### Vision Models (analysis)
+Prompt808 has two backends for both vision analysis and prompt enrichment:
+
+- **API (recommended)** — route inference through an OpenAI-compatible server (LM Studio, Ollama, llama.cpp, vLLM). Typically **10-20× faster** than the local path on the same GPU because llama.cpp/GGUF kernels and a resident model dwarf transformers' eager-mode + BnB-quant inference. Use whatever model is already loaded in your server. Select **API** in the vision-model dropdown (Analyze tab) or in the `llm_model` widget on the Generate node, and point `api_url` at your server (default `http://127.0.0.1:1234` for LM Studio).
+- **Local HF** — downloads a HuggingFace model on first use and runs it inside ComfyUI. Useful for self-contained installs with no external server, but slower than a llama.cpp/GGUF backend even at smaller model sizes.
+
+### Vision Models (local HF analysis)
 
 | Model                               | VRAM    | Notes                                           |
 | ----------------------------------- | ------- | ----------------------------------------------- |
@@ -118,7 +123,7 @@ Changes take effect immediately — no restart required.
 
 Vision models with non-standard tensor dimensions automatically fall back from FP8 to FP16 if block quantization is incompatible.
 
-### Text Models (prompt enrichment)
+### Text Models (local HF prompt enrichment)
 
 | Model                    | VRAM (FP16) | VRAM (4-bit) | Notes                                           |
 | ------------------------ | ----------- | ------------ | ----------------------------------------------- |

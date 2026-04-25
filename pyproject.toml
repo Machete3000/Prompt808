@@ -1,7 +1,7 @@
 [project]
 name = "prompt808"
 description = "Prompt808 allows you to analyze images, build style libraries, and generate prompts that match any learned aesthetic."
-version = "4.0.0"
+version = "4.1.0"
 license = {file = "LICENSE"}
 dependencies = [
     "transformers",

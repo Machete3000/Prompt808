@@ -165,21 +165,24 @@ def get_model_names():
 
 
 def get_vision_model_names():
-    """Return sorted vision model names from models.json.
+    """Return ['API'] + sorted vision model names from models.json.
 
+    The leading "API" entry routes vision inference through an
+    OpenAI-compatible endpoint instead of a local HF model.
     Pre-quantized FP8 models are excluded on GPUs with compute < 8.9.
     """
     try:
         with open(MODELS_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         fp8_ok = _gpu_supports_fp8()
-        return sorted(
+        names = sorted(
             name for name, info in raw.get("vision_models", {}).items()
             if fp8_ok or not info.get("quantized", False)
         )
+        return ["API"] + names
     except Exception as e:
         log.warning("Failed to load vision models: %s", e)
-        return []
+        return ["API"]
 
 
 def estimate_vision_model_vram(model_name, quantization="FP16"):
@@ -729,5 +732,95 @@ def generate_text_api(prompt, api_url, max_tokens=1024, temperature=0.9,
         log.info("API DEBUG seed=%d | elapsed=%.2fs | tok/s=%.1f",
                  seed, elapsed, tok_s)
         log.info("API DEBUG output:\n%s", content)
+
+    return content
+
+
+def generate_vision_api(image_path, prompt, api_url, max_tokens=2048,
+                        temperature=0.3, seed=42, debug=False):
+    """Generate a vision-language response via an OpenAI-compatible API.
+
+    Sends a chat completion request whose user message contains both an
+    image (base64-encoded as a data URL) and a text prompt.  The image
+    is downscaled to 1536px on the longest side before encoding to keep
+    payloads reasonable — this matches the local-inference downscale in
+    VisionModelManager so element-extraction quality is unchanged.
+
+    Compatible with LM Studio, Ollama, llama.cpp, vLLM and any server
+    that accepts the OpenAI vision message format.
+    """
+    import base64
+    import io
+    import urllib.error
+    import urllib.request
+
+    from PIL import Image
+
+    endpoint = api_url.rstrip("/") + "/v1/chat/completions"
+
+    # Match VisionModelManager's downscale so payload stays small and
+    # extraction quality matches local inference.
+    img = Image.open(image_path).convert("RGB")
+    MAX_SIDE = 1536
+    w, h = img.size
+    if max(w, h) > MAX_SIDE:
+        scale = MAX_SIDE / max(w, h)
+        img = img.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    data_url = f"data:image/jpeg;base64,{image_b64}"
+
+    payload = json.dumps({
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ],
+        "temperature": temperature,
+        "top_p": 0.9,
+        "max_tokens": max_tokens,
+        "seed": seed,
+        "stream": False,
+    }).encode("utf-8")
+
+    log.info("Generating vision response via API (%s)...", api_url)
+    t0 = time.perf_counter()
+
+    try:
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Vision API request failed: {e}") from e
+
+    elapsed = time.perf_counter() - t0
+
+    content = result["choices"][0]["message"]["content"].strip()
+
+    # Strip residual thinking tags some models emit
+    content = re.sub(r"<\|?think(?:ing)?\|?>.*?<\|?/think(?:ing)?\|?>",
+                     "", content, flags=re.DOTALL).strip()
+
+    usage = result.get("usage", {})
+    out_tokens = usage.get("completion_tokens", len(content.split()))
+    tok_s = out_tokens / elapsed if elapsed > 0 else 0
+    log.info("Vision API generated ~%d tokens in %.1fs (%.1f tok/s)",
+             out_tokens, elapsed, tok_s)
+
+    if debug:
+        log.info("Vision API DEBUG seed=%d | elapsed=%.2fs | tok/s=%.1f",
+                 seed, elapsed, tok_s)
+        log.info("Vision API DEBUG output:\n%s", content)
 
     return content
